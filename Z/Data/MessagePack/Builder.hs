@@ -1,29 +1,15 @@
 {-|
-Module    : Z.MessagePack.Builder
+Module    : Z.Data.MessagePack.Builder
 Description : MessagePack builders
 Copyright : (c) Hideyuki Tanaka 2009-2015
           , (c) Dong Han 2020
 License   : BSD3
 
-We use MessagePack extension type -1 to encode\/decode 'SystemTime' and 'UTCTime':
+'Builder's to encode in MessagePack format.
 
-    +--------+--------+--------+--------+--------+--------+--------+
-    |  0xc7  |   12   |   -1   |nanoseconds in 32-bit unsigned int |
-    +--------+--------+--------+--------+--------+--------+--------+
-    +--------+--------+--------+--------+--------+--------+--------+--------+
-                        seconds in 64-bit signed int                        |
-    +--------+--------+--------+--------+--------+--------+--------+--------+
-
-And we deliberately use ext type 0x00(positive) and 0x01(negative) to represent large numbers(Integers, Scientific, Fixed, DiffTime...):
-
-    +--------+--------+--------+=========================================+=======================================+
-    |  0xc7  |XXXXXXXX|  0x00  | base10 exponent(MessagePack int format) | coefficient(big endian 256-base limbs |
-    +--------+--------+--------+=========================================+=======================================+
-
-Use a MessagePack implementation supporting ext type to marshall it, result value is coefficient * (10 ^ exponent).
 -}
 
-module Z.MessagePack.Builder where
+module Z.Data.MessagePack.Builder where
 
 import           Control.Monad
 import           Data.Bits
@@ -37,7 +23,7 @@ import           Z.Data.Array.Unaligned
 import qualified Z.Data.Text                as T
 import qualified Z.Data.Builder             as B
 import qualified Z.Data.Vector              as V
-import           Z.MessagePack.Value        hiding (value)
+import           Z.Data.MessagePack.Value   hiding (value)
 
 value :: Value -> B.Builder ()
 {-# INLINABLE value #-}
@@ -95,15 +81,16 @@ scientificValue c e = Ext (if c > 0 then 0x00 else 0x01) . B.build $ do
   where
     siz# = sizeInBaseInteger c 256#
 
--- | Write a scientific value in ext format, e.g.
+-- | Write a scientific value in ext 0x00(positive) and 0x01(negative) format, e.g.
 --
 --  +--------+--------+--------+--------+
 --  |  0xD5  |  0x00  |  0x00  |  0x00  |
 --  +--------+--------+--------+--------+
 --
---  +--------+--------+--------+=========================================+=======================================+
+--
+--  +--------+--------+--------+-----------------------------------------+---------------------------------------+
 --  |  0xC7  |XXXXXXXX|  0x00  | base10 exponent(MessagePack int format) | coefficient(big endian 256-base limbs |
---  +--------+--------+--------+=========================================+=======================================+
+--  +--------+--------+--------+-----------------------------------------+---------------------------------------+
 --
 scientific :: Integer -> Int64 -> B.Builder ()
 {-# INLINE scientific #-}
@@ -141,7 +128,7 @@ timestampValue :: Int64 -> Int32 -> Value
 {-# INLINE timestampValue #-}
 timestampValue s ns = Ext 0xFF (B.build $ B.encodePrimBE ns >> B.encodePrimBE s)
 
--- | Write a timestamp(seconds, nanoseconds) in ext format, e.g.
+-- | Write a timestamp(seconds, nanoseconds) in ext 0xFF format, e.g.
 timestamp :: Int64 -> Int32 -> B.Builder ()
 {-# INLINE timestamp #-}
 timestamp s ns = B.encodePrim @(Word8, Word8, Word8, (BE Int32), (BE Int64)) (0xC7, 0x0C, 0xFF, (BE ns), (BE s))

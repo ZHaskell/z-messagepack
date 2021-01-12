@@ -16,10 +16,10 @@ bug-reports:                https://github.com/haskell-Z/z-redis/issues
 extra-source-files:         CHANGELOG.md
 
 library
-    exposed-modules:        Z.MessagePack.Builder
-                            Z.MessagePack.Base
-                            Z.MessagePack.Value
-                            Z.MessagePack
+    exposed-modules:        Z.Data.MessagePack
+                            Z.Data.MessagePack.Base
+                            Z.Data.MessagePack.Builder
+                            Z.Data.MessagePack.Value
 
     -- other-modules:
     -- other-extensions:
@@ -97,7 +97,7 @@ test-suite Z-MessagePack-Test
                           , primitive
                           , time
 
-    other-modules:          Z.MessagePack.BaseSpec
+    other-modules:          Z.Data.MessagePack.BaseSpec
 
     ghc-options:            -threaded
     default-language:       Haskell2010

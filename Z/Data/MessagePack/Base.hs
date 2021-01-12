@@ -1,5 +1,5 @@
 {-|
-Module      : Z.MessagePack.Base
+Module      : Z.Data.MessagePack.Base
 Description : Fast MessagePack serialization/deserialization
 Copyright   : (c) Dong Han, 2020
 License     : BSD
@@ -11,12 +11,12 @@ This module provides 'Converter' to convert 'Value' to haskell data types, and v
 
 -}
 
-module Z.MessagePack.Base
-  -- * MessagePack Class
-  ( MessagePack(..), Value(..), defaultSettings, Settings(..)
-  , -- * Encode & Decode
-    DecodeError
+module Z.Data.MessagePack.Base
+  ( -- * MessagePack Class
+    MessagePack(..), Value(..), defaultSettings, Settings(..)
+    -- * Encode & Decode
   , decode, decode', decodeChunks, decodeChunks', encode, encodeChunks
+  , DecodeError, P.ParseError
     -- * parse into MessagePack Value
   , MV.parseValue, MV.parseValue', MV.parseValueChunks, MV.parseValueChunks'
   -- * Generic FromValue, ToValue & EncodeMessagePack
@@ -82,10 +82,10 @@ import           Text.ParserCombinators.ReadP   (readP_to_S)
 import qualified Z.Data.Array                   as A
 import qualified Z.Data.Builder                 as B
 import           Z.Data.Generics.Utils
-import qualified Z.MessagePack.Builder          as MB
 import           Z.Data.JSON.Converter
-import           Z.MessagePack.Value            (Value (..))
-import qualified Z.MessagePack.Value            as MV
+import qualified Z.Data.MessagePack.Builder     as MB
+import           Z.Data.MessagePack.Value       (Value (..))
+import qualified Z.Data.MessagePack.Value       as MV
 import qualified Z.Data.Parser                  as P
 import qualified Z.Data.Parser.Numeric          as P
 import qualified Z.Data.Text.Base               as T
@@ -226,7 +226,7 @@ withBin _    f (Bin x) = f x
 withBin name _ v       = typeMismatch name "Bin" v
 
 -- | @'withBoundedScientific' name f value@ applies @f@ to the 'Scientific' number
--- when @value@ is a 'Ext' @0x00@ with exponent less than or equal to 1024.
+-- when @value@ is a 'Ext' @0x00\/0x01@ with exponent less than or equal to 1024.
 withBoundedScientific :: T.Text -> (Scientific -> Converter a) -> Value ->  Converter a
 {-# INLINE withBoundedScientific #-}
 withBoundedScientific name f v = withScientific name f' v
@@ -251,7 +251,7 @@ withBoundedScientific name f v = withScientific name f' v
 -- ==== Error message example
 --
 -- > withScientific "MyType" f (Str "oops")
--- > -- Error: "converting MyType failed, expected Ext 0x00, but encountered Str"
+-- > -- Error: "converting MyType failed, expected Ext 0x00/0x01, but encountered Str"
 withScientific :: T.Text -> (Scientific -> Converter a) -> Value ->  Converter a
 {-# INLINE withScientific #-}
 withScientific name f (Ext tag x) | tag <= 0x01 = do
@@ -264,7 +264,7 @@ withScientific name f (Ext tag x) | tag <= 0x01 = do
         let !c = importIntegerFromByteArray ba# (int2Word# s#) (int2Word# l#) 1#
         in if tag == 0x01 then f (negate (Sci.scientific c e))
                           else f (Sci.scientific c e)
-withScientific name _ v = typeMismatch name "Ext 0x00" v
+withScientific name _ v = typeMismatch name "Ext 0x00/0x01" v
 
 withSystemTime :: T.Text -> (SystemTime -> Converter a) -> Value ->  Converter a
 {-# INLINE withSystemTime #-}
@@ -798,7 +798,7 @@ instance MessagePack T.Text   where
 -- | Note this instance doesn't reject large input
 instance MessagePack Scientific where
     {-# INLINE fromValue #-}
-    fromValue = withBoundedScientific "Data.Scientific.Scientific" pure
+    fromValue = withScientific "Data.Scientific.Scientific" pure
     {-# INLINE toValue #-}
     toValue x = MB.scientificValue (coefficient x) (fromIntegral $ base10Exponent x)
     {-# INLINE encodeMessagePack #-}
@@ -1085,6 +1085,10 @@ INT_MessagePack_INSTANCE(Word16)
 INT_MessagePack_INSTANCE(Word32)
 INT_MessagePack_INSTANCE(Word64)
 
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'Integer' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
 instance MessagePack Integer where
     {-# INLINE fromValue #-}
     fromValue = withBoundedScientific "Integer" $ \ n ->
@@ -1098,6 +1102,10 @@ instance MessagePack Integer where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack x = MB.scientific x 0
 
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'Natural' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
 instance MessagePack Natural where
     {-# INLINE fromValue #-}
     fromValue = withBoundedScientific "Natural" $ \ n ->
@@ -1194,6 +1202,10 @@ instance (MessagePack a, Integral a) => MessagePack (Ratio a) where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack x = object' ( "numerator" .! (numerator x) <> "denominator" .! (denominator x) )
 
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'Fixed' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
 instance HasResolution a => MessagePack (Fixed a) where
     {-# INLINE fromValue #-}
     fromValue = withBoundedScientific "Data.Fixed" $ pure . realToFrac
@@ -1270,6 +1282,10 @@ instance MessagePack TimeOfDay where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack t = MB.str (B.unsafeBuildText (B.timeOfDay t))
 
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'NominalDiffTime' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
 instance MessagePack NominalDiffTime where
     {-# INLINE fromValue #-}
     fromValue = withBoundedScientific "NominalDiffTime" $ pure . realToFrac
@@ -1278,6 +1294,10 @@ instance MessagePack NominalDiffTime where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack = encodeMessagePack @Scientific . realToFrac
 
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'DiffTime' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
 instance MessagePack DiffTime where
     {-# INLINE fromValue #-}
     fromValue = withBoundedScientific "DiffTime" $ pure . realToFrac

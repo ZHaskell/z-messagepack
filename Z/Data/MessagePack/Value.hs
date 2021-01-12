@@ -1,11 +1,11 @@
 {- |
-Module    : Z.MessagePack.Value
+Module    : Z.Data.MessagePack.Value
 Description : MessagePack object definition and parser
 Copyright : (c) Hideyuki Tanaka 2009-2015
           , (c) Dong Han 2020
 License   : BSD3
 -}
-module Z.MessagePack.Value(
+module Z.Data.MessagePack.Value(
   -- * MessagePack Value
     Value(..)
     -- * parse into Message Value
@@ -33,17 +33,17 @@ import qualified Z.Data.Vector              as V
 
 -- | Representation of MessagePack data.
 data Value
-    = Bool                  !Bool                   -- ^ represents true or false
-    | Int    {-# UNPACK #-} !Int64                  -- ^ represents an integer
-    | Float  {-# UNPACK #-} !Float                  -- ^ represents a floating point number
-    | Double {-# UNPACK #-} !Double                 -- ^ represents a floating point number
-    | Str    {-# UNPACK #-} !T.Text                 -- ^ extending Raw type represents a UTF-8 str
-    | Bin    {-# UNPACK #-} !V.Bytes                -- ^ extending Raw type represents a byte array
-    | Array  {-# UNPACK #-} !(V.Vector Value)      -- ^ represents a sequence of objects
-    | Map    {-# UNPACK #-} !(V.Vector (Value, Value)) -- ^ represents key-value pairs of objects
-    | Ext    {-# UNPACK #-} !Word8                  -- ^ represents a tuple of an integer and a byte array where
-             {-# UNPACK #-} !V.Bytes                -- the integer represents type information and the byte array represents data.
-    | Nil                                           -- ^ represents nil
+    = Bool                  !Bool                   -- ^ true or false
+    | Int    {-# UNPACK #-} !Int64                  -- ^ an integer
+    | Float  {-# UNPACK #-} !Float                  -- ^ a floating point number
+    | Double {-# UNPACK #-} !Double                 -- ^ a floating point number
+    | Str    {-# UNPACK #-} !T.Text                 -- ^ a UTF-8 string
+    | Bin    {-# UNPACK #-} !V.Bytes                -- ^ a byte array
+    | Array  {-# UNPACK #-} !(V.Vector Value)       -- ^ a sequence of objects
+    | Map    {-# UNPACK #-} !(V.Vector (Value, Value)) -- ^ key-value pairs of objects
+    | Ext    {-# UNPACK #-} !Word8                  -- ^ type tag
+             {-# UNPACK #-} !V.Bytes                -- ^ data payload
+    | Nil                                           -- ^ nil
   deriving (Show, Eq, Ord, Generic)
   deriving anyclass T.Print
 
@@ -132,14 +132,14 @@ value = do
         0xC9 -> ext =<< P.decodePrimBE @Word32
 
         -- impossible
-        x -> P.fail' ("Z.MessagePack: unknown tag " <> T.toText x)
+        x -> P.fail' ("Z.Data.MessagePack: unknown tag " <> T.toText x)
 
   where
     str !l = do
         bs <- P.take (fromIntegral l)
         case T.validateMaybe bs of
             Just t -> return (Str t)
-            _  -> P.fail' "Z.MessagePack: illegal UTF8 Bytes"
+            _  -> P.fail' "Z.Data.MessagePack: illegal UTF8 Bytes"
     bin !l   = Bin <$> P.take (fromIntegral l)
     array !l = Array . V.packN (fromIntegral l) <$> replicateM (fromIntegral l) value
     map !l   = Map . V.packN (fromIntegral l) <$> replicateM (fromIntegral l) ((,) <$> value <*> value)

@@ -4,7 +4,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module Z.MessagePack.BaseSpec where
+module Z.Data.MessagePack.BaseSpec where
 
 import qualified Data.List                      as L
 import           Data.Word
@@ -32,8 +32,8 @@ import           Test.QuickCheck.Instances
 import           Test.QuickCheck.Property
 import           Test.Hspec
 import           Test.Hspec.QuickCheck
-import qualified Z.MessagePack                    as MessagePack
-import           Z.MessagePack (MessagePack(..), Value(..))
+import qualified Z.Data.MessagePack                    as MessagePack
+import           Z.Data.MessagePack (MessagePack(..), Value(..))
 
 
 data T a
