@@ -7,7 +7,7 @@ Maintainer  : winterland1989@gmail.com
 Stability   : experimental
 Portability : non-portable
 
-This module provides an interface similar to 'Z.Data.JSON', to work with MessagePack binary format.
+This module provides an interface similar to "Z.Data.JSON", to work with MessagePack binary format.
 
   * @Maybe a@ convert to 'Nil' in 'Nothing' case, and @a@ in 'Just' case.
   * Use 'Int64'(signed) or 'Word64'(unsigned) type to marshall int type format, smaller types will sliently truncate when overflow.
@@ -43,7 +43,7 @@ data Person = Person {name :: T.Text, age :: Int}
     deriving (Show, Generic)
     deriving anyclass (MessagePack.MessagePack)
 
-> MessagePack.encode Person{ name="Alice", age=16 }
+> MessagePack.encode Person{ name=\"Alice\", age=16 }
 > [130,164,110,97,109,101,165,65,108,105,99,101,163,97,103,101,16]
 @
 
