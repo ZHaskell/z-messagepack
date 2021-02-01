@@ -1,6 +1,6 @@
 cabal-version:              >=1.10
 name:                       Z-MessagePack
-version:                    0.1.0.0
+version:                    0.2.0.0
 synopsis:                   MessagePack
 description:                MessagePack binary serialization format.
 license:                    BSD3
@@ -34,8 +34,8 @@ library
                             , integer-gmp               == 1.*
                             , tagged                    == 0.8.*
                             , time                      >= 1.9 && < 2.0
-                            , Z-Data                    == 0.4.*
-                            , Z-IO                      == 0.4.*
+                            , Z-Data                    == 0.5.*
+                            , Z-IO                      == 0.5.*
 
     -- hs-source-dirs:
     default-language:    Haskell2010

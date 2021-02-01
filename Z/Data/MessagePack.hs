@@ -90,7 +90,7 @@ import qualified Z.IO.FileSystem as FS
 
 -- | Decode a 'MessagePack' instance from file.
 readMessagePackFile :: (HasCallStack, MessagePack a) => CBytes -> IO a
-readMessagePackFile p = unwrap . decode' =<< FS.readFile p
+readMessagePackFile p = unwrap "EPARSE" . decode' =<< FS.readFile p
 
 -- | Encode a 'MessagePack' instance to file.
 writeMessagePackFile :: (HasCallStack, MessagePack a) => CBytes -> a -> IO ()
