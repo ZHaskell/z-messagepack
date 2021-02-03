@@ -1,4 +1,3 @@
-{-# LANGUAGE QuantifiedConstraints #-}
 {-|
 Module      : Z.Data.MessagePack.Base
 Description : Fast MessagePack serialization/deserialization
@@ -81,9 +80,8 @@ import           GHC.Integer.GMP.Internals
 import           System.Exit
 import           Text.ParserCombinators.ReadP   (readP_to_S)
 import qualified Z.Data.Array                   as A
-import           Z.Data.Array.Unaligned
 import qualified Z.Data.Builder                 as B
-import           Z.Data.CBytes                  (CBytes, rawPrimArray, fromPrimArray)
+import qualified Z.Data.CBytes                  as CBytes
 import           Z.Data.Generics.Utils
 import           Z.Data.JSON.Converter
 import qualified Z.Data.MessagePack.Builder     as MB
@@ -961,6 +959,15 @@ instance MessagePack a => MessagePack (A.SmallArray a) where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack = MB.array encodeMessagePack
 
+instance (Prim a, MessagePack a) => MessagePack (A.PrimArray a) where
+    {-# INLINE fromValue #-}
+    fromValue = withArray "Z.Data.Array.PrimArray"
+        (V.traverseWithIndex $ \ k v -> fromValue v <?> Index k)
+    {-# INLINE toValue #-}
+    toValue = Array . V.map toValue
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack = MB.array encodeMessagePack
+
 instance (A.PrimUnlifted a, MessagePack a) => MessagePack (A.UnliftedArray a) where
     {-# INLINE fromValue #-}
     fromValue = withArray "Z.Data.Array.UnliftedArray"
@@ -981,33 +988,32 @@ instance MessagePack A.ByteArray where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack (A.ByteArray ba#) = MB.bin (V.arrVec (A.PrimArray ba#))
 
-instance MessagePack CBytes where
+instance (Prim a, MessagePack a) => MessagePack (V.PrimVector a) where
     {-# INLINE fromValue #-}
-    fromValue v = fromPrimArray <$> fromValue v
+    fromValue = withArray "Z.Data.Vector.PrimVector"
+        (V.traverseWithIndex $ \ k v -> fromValue v <?> Index k)
     {-# INLINE toValue #-}
-    toValue = toValue . rawPrimArray
+    toValue = Array . V.map toValue
     {-# INLINE encodeMessagePack #-}
-    encodeMessagePack = encodeMessagePack . rawPrimArray
+    encodeMessagePack = MB.array encodeMessagePack
 
--- | Encode elements in big endian binary.
-instance (Prim a) => MessagePack (A.PrimArray a) where
+-- | This is an INCOHERENT instance, write 'Bytes' as Bin.
+instance {-# INCOHERENT #-} MessagePack V.Bytes where
     {-# INLINE fromValue #-}
-    fromValue = withBin "PrimArray" $ \ (V.PrimVector pa s l) ->
-        pure $! primArrayFromBE pa s l
+    fromValue = withBin "Z.Data.Vector.Bytes" pure
     {-# INLINE toValue #-}
-    toValue pa = Bin (V.arrVec (primArrayToBE pa 0 (A.sizeofArr pa)))
+    toValue = Bin
     {-# INLINE encodeMessagePack #-}
-    encodeMessagePack pa = MB.bin (V.arrVec (primArrayToBE pa 0 (A.sizeofArr pa)))
+    encodeMessagePack = MB.bin
 
--- | Encode elements in big endian binary.
-instance forall a.(Prim a, Unaligned (BE a)) => MessagePack (V.PrimVector a) where
+-- | Write 'CBytes' as Bin not Str.
+instance MessagePack CBytes.CBytes where
     {-# INLINE fromValue #-}
-    fromValue = withBin "PrimArray" $ \ (V.PrimVector pa s l) ->
-        pure $! (V.arrVec (primArrayFromBE pa s l))
+    fromValue = withBin "Z.Data.CBytes" (pure . CBytes.fromBytes)
     {-# INLINE toValue #-}
-    toValue (V.PrimVector pa s l) = Bin (V.arrVec (primArrayToBE pa s l))
+    toValue = Bin . CBytes.toBytes
     {-# INLINE encodeMessagePack #-}
-    encodeMessagePack (V.PrimVector pa s l) = MB.bin (V.arrVec (primArrayToBE pa s l))
+    encodeMessagePack = MB.bin . CBytes.toBytes
 
 instance MessagePack a => MessagePack (V.Vector a) where
     {-# INLINE fromValue #-}
@@ -1036,6 +1042,15 @@ instance MessagePack a => MessagePack [a] where
     toValue = Array . V.pack . map toValue
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack = MB.array' encodeMessagePack
+
+-- | This is an INCOHERENT instance, encode 'String' with 'Str'.
+instance {-# INCOHERENT #-} MessagePack String where
+    {-# INLINE fromValue #-}
+    fromValue = withStr "String" (pure . T.unpack)
+    {-# INLINE toValue #-}
+    toValue = Str . T.pack
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack = MB.str . T.pack
 
 instance MessagePack a => MessagePack (NonEmpty a) where
     {-# INLINE fromValue #-}
