@@ -1,3 +1,4 @@
+{-# LANGUAGE QuantifiedConstraints #-}
 {-|
 Module      : Z.Data.MessagePack.Base
 Description : Fast MessagePack serialization/deserialization
@@ -80,7 +81,9 @@ import           GHC.Integer.GMP.Internals
 import           System.Exit
 import           Text.ParserCombinators.ReadP   (readP_to_S)
 import qualified Z.Data.Array                   as A
+import           Z.Data.Array.Unaligned
 import qualified Z.Data.Builder                 as B
+import           Z.Data.CBytes                  (CBytes, rawPrimArray, fromPrimArray)
 import           Z.Data.Generics.Utils
 import           Z.Data.JSON.Converter
 import qualified Z.Data.MessagePack.Builder     as MB
@@ -958,15 +961,6 @@ instance MessagePack a => MessagePack (A.SmallArray a) where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack = MB.array encodeMessagePack
 
-instance (Prim a, MessagePack a) => MessagePack (A.PrimArray a) where
-    {-# INLINE fromValue #-}
-    fromValue = withArray "Z.Data.Array.PrimArray"
-        (V.traverseWithIndex $ \ k v -> fromValue v <?> Index k)
-    {-# INLINE toValue #-}
-    toValue = Array . V.map toValue
-    {-# INLINE encodeMessagePack #-}
-    encodeMessagePack = MB.array encodeMessagePack
-
 instance (A.PrimUnlifted a, MessagePack a) => MessagePack (A.UnliftedArray a) where
     {-# INLINE fromValue #-}
     fromValue = withArray "Z.Data.Array.UnliftedArray"
@@ -987,14 +981,33 @@ instance MessagePack A.ByteArray where
     {-# INLINE encodeMessagePack #-}
     encodeMessagePack (A.ByteArray ba#) = MB.bin (V.arrVec (A.PrimArray ba#))
 
-instance (Prim a, MessagePack a) => MessagePack (V.PrimVector a) where
+instance MessagePack CBytes where
     {-# INLINE fromValue #-}
-    fromValue = withArray "Z.Data.Vector.PrimVector"
-        (V.traverseWithIndex $ \ k v -> fromValue v <?> Index k)
+    fromValue v = fromPrimArray <$> fromValue v
     {-# INLINE toValue #-}
-    toValue = Array . V.map toValue
+    toValue = toValue . rawPrimArray
     {-# INLINE encodeMessagePack #-}
-    encodeMessagePack = MB.array encodeMessagePack
+    encodeMessagePack = encodeMessagePack . rawPrimArray
+
+-- | Encode elements in big endian binary.
+instance (Prim a) => MessagePack (A.PrimArray a) where
+    {-# INLINE fromValue #-}
+    fromValue = withBin "PrimArray" $ \ (V.PrimVector pa s l) ->
+        pure $! primArrayFromBE pa s l
+    {-# INLINE toValue #-}
+    toValue pa = Bin (V.arrVec (primArrayToBE pa 0 (A.sizeofArr pa)))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack pa = MB.bin (V.arrVec (primArrayToBE pa 0 (A.sizeofArr pa)))
+
+-- | Encode elements in big endian binary.
+instance forall a.(Prim a, Unaligned (BE a)) => MessagePack (V.PrimVector a) where
+    {-# INLINE fromValue #-}
+    fromValue = withBin "PrimArray" $ \ (V.PrimVector pa s l) ->
+        pure $! (V.arrVec (primArrayFromBE pa s l))
+    {-# INLINE toValue #-}
+    toValue (V.PrimVector pa s l) = Bin (V.arrVec (primArrayToBE pa s l))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack (V.PrimVector pa s l) = MB.bin (V.arrVec (primArrayToBE pa s l))
 
 instance MessagePack a => MessagePack (V.Vector a) where
     {-# INLINE fromValue #-}
