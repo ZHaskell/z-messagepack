@@ -1,5 +1,10 @@
 ## Z-MessagePack
 
+[![Hackage](https://img.shields.io/hackage/v/Z-MessagePack.svg?style=flat)](https://hackage.haskell.org/package/Z-MessagePack)
+[![Linux Build Status](https://github.com/haskell-Z/z-messagepack/workflows/ubuntu-ci/badge.svg)](https://github.com/haskell-Z/z-messagepack/actions)
+[![MacOS Build Status](https://github.com/haskell-Z/z-messagepack/workflows/osx-ci/badge.svg)](https://github.com/haskell-Z/z-messagepack/actions)
+[![Windows Build Status](https://github.com/haskell-Z/z-messagepack/workflows/win-ci/badge.svg)](https://github.com/haskell-Z/z-messagepack/actions)
+
 This package is part of [Z](https://github.com/haskell-Z/Z) project, provides MessagePack codecs.
 
 ## Requirements
