@@ -5,7 +5,7 @@ Copyright : (c) Hideyuki Tanaka 2009-2015
           , (c) Dong Han 2020
 License   : BSD3
 
-'Builder's to encode in MessagePack format.
+'Builder's to encode Haskell data types in MessagePack format.
 
 -}
 
@@ -51,24 +51,23 @@ bool True  = B.word8 0xC3
 int :: Int64 -> B.Builder ()
 {-# INLINE int #-}
 int n
-    | -0x20 <= n && n < 0x80         =  B.word8 (fromIntegral n)
-    | 0     <= n && n < 0x100        =  B.word8 0xCC >> B.word8 (fromIntegral n)
-    | 0     <= n && n < 0x10000      =  B.word8 0xCD >> B.encodePrimBE @Word16 (fromIntegral n)
-    | 0     <= n && n < 0x100000000  =  B.word8 0xCE >> B.encodePrimBE @Word32 (fromIntegral n)
-    | 0     <= n                     =  B.word8 0xCF >> B.encodePrimBE @Word64 (fromIntegral n)
-    | -0x80 <= n                     =  B.word8 0xD0 >> B.word8 (fromIntegral n)
-    | -0x8000 <= n                   =  B.word8 0xD1 >> B.encodePrimBE @Word16 (fromIntegral n)
-    | -0x80000000 <= n               =  B.word8 0xD2 >> B.encodePrimBE @Word32 (fromIntegral n)
-    | otherwise                      =  B.word8 0xD3 >> B.encodePrimBE @Word64 (fromIntegral n)
+    | -0x20 <= n && n < 0x80         =  B.encodePrim (fromIntegral n :: Word8)
+    | 0     <= n && n < 0x100        =  B.encodePrim (0xCC :: Word8, fromIntegral n :: Word8)
+    | 0     <= n && n < 0x10000      =  B.encodePrim (0xCD :: Word8, BE (fromIntegral n :: Word16))
+    | 0     <= n && n < 0x100000000  =  B.encodePrim (0xCE :: Word8, BE (fromIntegral n :: Word32))
+    | 0     <= n                     =  B.encodePrim (0xCF :: Word8, BE (fromIntegral n :: Word64))
+    | -0x80 <= n                     =  B.encodePrim (0xD0 :: Word8, fromIntegral n :: Word8)
+    | -0x8000 <= n                   =  B.encodePrim (0xD1 :: Word8, BE (fromIntegral n :: Word16))
+    | -0x80000000 <= n               =  B.encodePrim (0xD2 :: Word8, BE (fromIntegral n :: Word32))
+    | otherwise                      =  B.encodePrim (0xD3 :: Word8, BE (fromIntegral n :: Word64))
 
 float :: Float -> B.Builder ()
 {-# INLINE float #-}
-float f = B.word8 0xCA >> B.encodePrimBE f
+float f = B.encodePrim (0xCA :: Word8, BE f)
 
 double :: Double -> B.Builder ()
 {-# INLINE double #-}
-double d = B.word8 0xCB >> B.encodePrimBE d
-
+double d = B.encodePrim (0xCB :: Word8, BE d)
 
 -- | Construct a scientific value, see 'scientific'.
 scientificValue :: Integer -> Int64 -> Value
@@ -93,7 +92,7 @@ scientificValue c e = Ext (if c > 0 then 0x00 else 0x01) . B.build $ do
 --  +--------+--------+--------+-----------------------------------------+---------------------------------------+
 --
 scientific :: Integer -> Int64 -> B.Builder ()
-{-# INLINE scientific #-}
+{-# INLINABLE scientific #-}
 scientific 0 _ = B.encodePrim @(Word8, Word8, Word8, Word8) (0xD5, 0x00, 0x00, 0x00)
 scientific c e = do
     case (I# (word2Int# siz#)) + intSiz e of
@@ -102,9 +101,9 @@ scientific c e = do
         4 -> B.word8 0xD6
         8 -> B.word8 0xD7
         16 -> B.word8 0xD8
-        siz' | siz' < 0x100   -> B.word8 0xC7 >> B.word8 (fromIntegral siz')
-             | siz' < 0x10000 -> B.word8 0xC8 >> B.encodePrimBE @Word16 (fromIntegral siz')
-             | otherwise      -> B.word8 0xC9 >> B.encodePrimBE @Word32 (fromIntegral siz')
+        siz' | siz' < 0x100   -> B.encodePrim (0xC7 :: Word8, fromIntegral siz' :: Word8)
+             | siz' < 0x10000 -> B.encodePrim (0xC8 :: Word8, BE (fromIntegral siz' :: Word16))
+             | otherwise      -> B.encodePrim (0xC9 :: Word8, BE (fromIntegral siz' :: Word32))
     B.word8 (if c > 0 then 0x00 else 0x01)
     int e
     B.writeN (I# (word2Int# siz#)) $ \ (MutablePrimArray mba#) (I# off#) ->
@@ -126,12 +125,13 @@ scientific c e = do
 -- | Construct a timestamp(seconds, nanoseconds) value.
 timestampValue :: Int64 -> Int32 -> Value
 {-# INLINE timestampValue #-}
-timestampValue s ns = Ext 0xFF (B.build $ B.encodePrimBE ns >> B.encodePrimBE s)
+timestampValue s ns = Ext 0xFF (B.build $ B.encodePrim (BE ns, BE s))
 
 -- | Write a timestamp(seconds, nanoseconds) in ext 0xFF format, e.g.
 timestamp :: Int64 -> Int32 -> B.Builder ()
 {-# INLINE timestamp #-}
-timestamp s ns = B.encodePrim @(Word8, Word8, Word8, (BE Int32), (BE Int64)) (0xC7, 0x0C, 0xFF, (BE ns), (BE s))
+timestamp s ns = B.encodePrim
+    (0xC7 :: Word8, 0x0C :: Word8, 0xFF :: Word8, (BE ns :: BE Int32), (BE s :: BE Int64))
 
 str' :: String -> B.Builder ()
 {-# INLINE str' #-}
@@ -143,18 +143,18 @@ str t = do
     let bs = T.getUTF8Bytes t
     case V.length bs of
         len | len <= 31      ->  B.word8 (0xA0 .|. fromIntegral len)
-            | len < 0x100    ->  B.word8 0xD9 >> B.word8 (fromIntegral len)
-            | len < 0x10000  ->  B.word8 0xDA >> B.encodePrimBE @Word16 (fromIntegral len)
-            | otherwise      ->  B.word8 0xDB >> B.encodePrimBE @Word32 (fromIntegral len)
+            | len < 0x100    ->  B.encodePrim (0xD9 :: Word8, fromIntegral len :: Word8)
+            | len < 0x10000  ->  B.encodePrim (0xDA :: Word8, BE (fromIntegral len :: Word16))
+            | otherwise      ->  B.encodePrim (0xDB :: Word8, BE (fromIntegral len :: Word32))
     B.bytes bs
 
 bin :: V.Bytes -> B.Builder ()
 {-# INLINE bin #-}
 bin bs = do
     case V.length bs of
-        len | len < 0x100    ->  B.word8 0xC4 >> B.word8 (fromIntegral len)
-            | len < 0x10000  ->  B.word8 0xC5 >> B.encodePrimBE @Word16 (fromIntegral len)
-            | otherwise      ->  B.word8 0xC6 >> B.encodePrimBE @Word32 (fromIntegral len)
+        len | len < 0x100    ->  B.encodePrim (0xC4 :: Word8, fromIntegral len :: Word8)
+            | len < 0x10000  ->  B.encodePrim (0xC5 :: Word8, BE (fromIntegral len :: Word16))
+            | otherwise      ->  B.encodePrim (0xC6 :: Word8, BE (fromIntegral len :: Word32))
     B.bytes bs
 
 array :: V.Vec v a => (a -> B.Builder ()) -> v a -> B.Builder ()
@@ -173,8 +173,8 @@ arrayHeader :: Int -> B.Builder ()
 {-# INLINE arrayHeader #-}
 arrayHeader len
     | len <= 15      =  B.word8 (0x90 .|. fromIntegral len)
-    | len < 0x10000  =  B.word8 0xDC >> B.encodePrimBE @Word16 (fromIntegral len)
-    | otherwise      =  B.word8 0xDD >> B.encodePrimBE @Word32 (fromIntegral len)
+    | len < 0x10000  =  B.encodePrim (0xDC :: Word8, BE (fromIntegral len :: Word16))
+    | otherwise      =  B.encodePrim (0xDD :: Word8, BE (fromIntegral len :: Word32))
 
 map :: (a -> B.Builder ()) -> (b -> B.Builder ()) -> V.Vector (a, b) -> B.Builder ()
 {-# INLINE map #-}
@@ -192,8 +192,8 @@ mapHeader :: Int -> B.Builder ()
 {-# INLINE mapHeader #-}
 mapHeader len
     | len <= 15      =  B.word8 (0x80 .|. fromIntegral len)
-    | len < 0x10000  =  B.word8 0xDE >> B.encodePrimBE @Word16 (fromIntegral len)
-    | otherwise      =  B.word8 0xDF >> B.encodePrimBE @Word32 (fromIntegral len)
+    | len < 0x10000  =  B.encodePrim (0xDE :: Word8, BE (fromIntegral len :: Word16))
+    | otherwise      =  B.encodePrim (0xDF :: Word8, BE (fromIntegral len :: Word32))
 
 ext :: Word8 -> V.Bytes -> B.Builder ()
 {-# INLINABLE ext #-}
@@ -204,8 +204,8 @@ ext typ dat = do
         4  -> B.word8 0xD6
         8  -> B.word8 0xD7
         16 -> B.word8 0xD8
-        len | len < 0x100   -> B.word8 0xC7 >> B.word8 (fromIntegral len)
-            | len < 0x10000 -> B.word8 0xC8 >> B.encodePrimBE @Word16 (fromIntegral len)
-            | otherwise     -> B.word8 0xC9 >> B.encodePrimBE @Word32 (fromIntegral len)
+        len | len < 0x100   -> B.encodePrim (0xC7 :: Word8, fromIntegral len :: Word8)
+            | len < 0x10000 -> B.encodePrim (0xC8 :: Word8, BE (fromIntegral len :: Word16))
+            | otherwise     -> B.encodePrim (0xC9 :: Word8, BE (fromIntegral len :: Word32))
     B.word8 typ
     B.bytes dat
