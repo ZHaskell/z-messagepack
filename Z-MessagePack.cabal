@@ -20,6 +20,7 @@ library
                             Z.Data.MessagePack.Base
                             Z.Data.MessagePack.Builder
                             Z.Data.MessagePack.Value
+                            Z.IO.MessagePack
 
     -- other-modules:
     -- other-extensions:
@@ -52,6 +53,7 @@ library
                             ExistentialQuantification
                             FlexibleContexts
                             FlexibleInstances
+                            GADTs
                             GeneralizedNewtypeDeriving 
                             KindSignatures
                             MagicHash
