@@ -17,9 +17,9 @@ import Z.IO
 import qualified Z.Data.Text as T
 
 serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
- [ ("foo", CallHandler $ \ (req :: Int) -> do
+ [ ("foo", CallHandler $ \\ (req :: Int) -> do
      return (req + 1))
- , ("bar", NotifyHandler $ \ (req :: T.Text) -> do
+ , ("bar", NotifyHandler $ \\ (req :: T.Text) -> do
      printStd (req <> "world"))
  ]
 
@@ -29,10 +29,10 @@ import Z.IO.Network
 import Z.IO
 import qualified Z.Data.Text as T
 
-withResource (initTCPClient defaultTCPClientConfig) $ \ uvs -> do
+withResource (initTCPClient defaultTCPClientConfig) $ \\ uvs -> do
     c <- rpcClient uvs
-    call @Int @Int c "foo" 1
-    call @T.Text @T.Text c "bar" "hello"
+    call \@Int \@Int c "foo" 1
+    call \@T.Text \@T.Text c "bar" "hello"
 @
 
 -}
@@ -96,10 +96,12 @@ type PipelineResult = FIM.FlatIntMap MV.Value
 --
 -- @
 --  ...
---  fooId <- client `callPipeline` "foo" $ ...
---  barId <- client `callPipeline` "bar" $ ...
---  client `motifyPipeline` "qux" $ ...
+--  fooId <- callPipeline client "foo" $ ...
+--  barId <- callPipeline client "bar" $ ...
+--  notifyPipeline client "qux" $ ...
+--
 --  r <- execPipeline client
+--
 --  fooResult <- fetchPipeline fooId r
 --  barResult <- fetchPipeline barId r
 -- @
@@ -180,9 +182,9 @@ data ServerHandler where
 -- import Z.IO
 --
 -- serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
---  [ ("foo", CallHandler $ \ req -> do
+--  [ ("foo", CallHandler $ \\ req -> do
 --      ... )
---  , ("bar", CallHandler $ \ req -> do
+--  , ("bar", CallHandler $ \\ req -> do
 --      ... )
 --  ]
 --

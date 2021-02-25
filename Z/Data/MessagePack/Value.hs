@@ -8,7 +8,7 @@ License   : BSD3
 module Z.Data.MessagePack.Value(
   -- * MessagePack Value
     Value(..)
-    -- * parse into Message Value
+    -- * parse into MessagePack Value
   , parseValue
   , parseValue'
   , parseValueChunks
@@ -29,7 +29,6 @@ import           Prelude                    hiding (map)
 import qualified Z.Data.Text                as T
 import qualified Z.Data.Parser              as P
 import qualified Z.Data.Vector              as V
-
 
 -- | Representation of MessagePack data.
 data Value
