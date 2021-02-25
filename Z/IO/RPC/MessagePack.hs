@@ -19,8 +19,8 @@ import qualified Z.Data.Text as T
 serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
  [ ("foo", CallHandler $ \ (req :: Int) -> do
      return (req + 1))
- , ("bar", CallHandler $ \ (req :: T.Text) -> do
-     return (req <> "world"))
+ , ("bar", NotifyHandler $ \ (req :: T.Text) -> do
+     printStd (req <> "world"))
  ]
 
 -- client
@@ -79,20 +79,15 @@ rpcClient' i o recvBufSiz sendBufSiz = do
     bo <- newBufferedOutput' sendBufSiz o
     return (Client seqRef reqNum bi bo)
 
--- | Send a normal RPC call and get result.
+-- | Send a single RPC call and get result.
 call:: (MessagePack req, MessagePack res) => Client -> T.Text -> req -> IO res
 call cli name req = do
     msgid <- callPipeline cli name req
     fetchPipeline msgid =<< execPipeline cli
 
--- | Send a notification RPC call without getting result.
-oneway :: MessagePack req => Client -> T.Text -> req -> IO ()
-oneway (Client _ _ _ bo) name req = do
-    writeBuilder bo $ do
-        MB.arrayHeader 3
-        MB.int 0            -- ^ type
-        MB.str name
-        MP.encodeMessagePack req
+-- | Send a single notification RPC call without getting result.
+notify :: MessagePack req => Client -> T.Text -> req -> IO ()
+notify c@(Client _ _ _ bo) name req = notifyPipeline c name req >> flushBuffer bo
 
 type PipelineId = Int
 type PipelineResult = FIM.FlatIntMap MV.Value
@@ -103,6 +98,7 @@ type PipelineResult = FIM.FlatIntMap MV.Value
 --  ...
 --  fooId <- client `callPipeline` "foo" $ ...
 --  barId <- client `callPipeline` "bar" $ ...
+--  client `motifyPipeline` "qux" $ ...
 --  r <- execPipeline client
 --  fooResult <- fetchPipeline fooId r
 --  barResult <- fetchPipeline barId r
@@ -118,10 +114,22 @@ callPipeline (Client seqRef reqNum _ bo) name req = do
         MB.arrayHeader 4
         MB.int 0                        -- type request
         MB.int (fromIntegral msgid')    -- msgid
-        MB.str name                     -- method
-        MP.encodeMessagePack req
+        MB.str name                     -- method name
+        MP.encodeMessagePack req        -- param
     return msgid'
 
+-- | Make a notify inside a pipeline, which will be sent in batch when `execPipeline`.
+--
+-- Notify calls doesn't affect execution's result.
+notifyPipeline :: HasCallStack => MessagePack req => Client -> T.Text -> req -> IO ()
+notifyPipeline (Client _ _ _ bo) name req = do
+    writeBuilder bo $ do
+        MB.arrayHeader 3
+        MB.int 2                        -- type notification
+        MB.str name                     -- method name
+        MP.encodeMessagePack req        -- param
+
+-- | Exception thrown when remote endpoint return errors.
 data RPCException = RPCException MV.Value CallStack deriving Show
 instance Exception RPCException
 
@@ -162,7 +170,7 @@ type ServerLoop = (UVStream -> IO ()) -> IO ()
 type ServerService = T.Text -> Maybe ServerHandler
 data ServerHandler where
     CallHandler :: (MessagePack req, MessagePack res) => (req -> IO res) -> ServerHandler
-    OneWayHandler :: MessagePack req => (req -> IO ()) -> ServerHandler
+    NotifyHandler :: MessagePack req => (req -> IO ()) -> ServerHandler
 
 -- | Simple router using `FlatMap`, lookup name in /O(log(N))/.
 --
@@ -201,21 +209,40 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
     loop bi bo = do
         req <- pull (sourceParserFromBuffered (do
             tag <- P.anyWord8
-            when (tag /= 0x94) (P.fail' $ "wrong request tag: " <> T.toText tag)
-            !typ <- MV.value
-            !seq <- MV.value
-            !name <- MV.value
-            !v <- MV.value
-            case typ of
-                MV.Int 0 -> case seq of
-                    MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF -> case name of
-                        MV.Str name' -> return (msgid, name', v)
-                        _ -> P.fail' $ "wrong RPC name: " <> T.toText name
-                    _ -> P.fail' $ "wrong msgid: " <> T.toText seq
-                _ -> P.fail' $ "wrong request type: " <> T.toText typ
+            case tag of
+                -- notify
+                0x93 -> do
+                    !typ <- MV.value
+                    !name <- MV.value
+                    !v <- MV.value
+                    case typ of
+                        MV.Int 2 -> case name of
+                            MV.Str name' -> return (Left (name', v))
+                            _ -> P.fail' $ "wrong RPC name: " <> T.toText name
+                        _ -> P.fail' $ "wrong notification type: " <> T.toText typ
+                -- call
+                0x94 -> do
+                    !typ <- MV.value
+                    !seq <- MV.value
+                    !name <- MV.value
+                    !v <- MV.value
+                    case typ of
+                        MV.Int 0 -> case seq of
+                            MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF -> case name of
+                                MV.Str name' -> return (Right (msgid, name', v))
+                                _ -> P.fail' $ "wrong RPC name: " <> T.toText name
+                            _ -> P.fail' $ "wrong msgid: " <> T.toText seq
+                        _ -> P.fail' $ "wrong request type: " <> T.toText typ
+                _ -> P.fail' $ "wrong request tag: " <> T.toText tag
             ) bi)
         case req of
-            Just (msgid, name, v) -> do
+            Just (Left (name, v)) -> do
+                case handle name of
+                    Just (NotifyHandler f) -> do
+                        f =<< unwrap "EPARSE" (MP.convertValue v)
+                    _ -> throwOtherError "ENOTFOUND" "notification method not found"
+                loop bi bo
+            Just (Right (msgid, name, v)) -> do
                 case handle name of
                     Just (CallHandler f) -> do
                         res <- try (f =<< unwrap "EPARSE" (MP.convertValue v))
@@ -231,16 +258,13 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
                                     MB.nil
                                     MP.encodeMessagePack res
                         flushBuffer bo
-                    Just (OneWayHandler f) -> do
-                        f =<< unwrap "EPARSE" (MP.convertValue v)
                     _ -> do
                         writeBuilder bo $ do
                             MB.arrayHeader 4
                             MB.int 1                        -- type response
                             MB.int (fromIntegral msgid)     -- msgid
-                            MB.str $ "method " <> name <> " not found"
+                            MB.str $ "request method: " <> name <> " not found"
                             MB.nil
                         flushBuffer bo
                 loop bi bo
             _ -> return ()
-
