@@ -1,4 +1,43 @@
-module Z.IO.MessagePack where
+{-|
+Module      : Z.Data.MessagePack
+Description : Fast MessagePack serialization/deserialization
+Copyright   : (c) Dong Han, 2019
+License     : BSD
+Maintainer  : winterland1989@gmail.com
+Stability   : experimental
+Portability : non-portable
+
+This module provides <https://github.com/msgpack-rpc/msgpack-rpc/blob/master/spec.md MessagePack-RPC> implementation.
+
+@
+-- server
+import Z.IO.RPC.MessagePack
+import Z.IO.Network
+import Z.IO
+import qualified Z.Data.Text as T
+
+serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
+ [ ("foo", CallHandler $ \ (req :: Int) -> do
+     return (req + 1))
+ , ("bar", CallHandler $ \ (req :: T.Text) -> do
+     return (req <> "world"))
+ ]
+
+-- client
+import Z.IO.RPC.MessagePack
+import Z.IO.Network
+import Z.IO
+import qualified Z.Data.Text as T
+
+withResource (initTCPClient defaultTCPClientConfig) $ \ uvs -> do
+    c <- rpcClient uvs
+    call @Int @Int c "foo" 1
+    call @T.Text @T.Text c "bar" "hello"
+@
+
+-}
+
+module Z.IO.RPC.MessagePack where
 
 import           Control.Monad
 import           Data.Bits
@@ -22,18 +61,7 @@ data Client = Client
     , _clientBufferedOutput :: BufferedOutput
     }
 
--- | Open a RPC client based on stream.
---
--- @
--- import Z.IO
--- import Z.IO.Network
---
--- -- open a RPC client over tcp connection
--- withResource (initTCPClient defaultTCPClientConfig) $ \ uvs -> do
---     client <- rpcClient uvs
---     client `call` "foo" $ ...
---
--- @
+-- | Open a RPC client from input/output device.
 rpcClient :: (Input dev, Output dev) => dev -> IO Client
 rpcClient uvs = rpcClient' uvs uvs V.defaultChunkSize V.defaultChunkSize
 
@@ -131,20 +159,45 @@ fetchPipeline msgid r = do
 --------------------------------------------------------------------------------
 
 type ServerLoop = (UVStream -> IO ()) -> IO ()
+type ServerService = T.Text -> Maybe ServerHandler
 data ServerHandler where
     CallHandler :: (MessagePack req, MessagePack res) => (req -> IO res) -> ServerHandler
     OneWayHandler :: MessagePack req => (req -> IO ()) -> ServerHandler
 
-serveRPC :: ServerLoop -> [(T.Text, ServerHandler)] -> IO ()
+-- | Simple router using `FlatMap`, lookup name in /O(log(N))/.
+--
+-- @
+-- import Z.IO.PRC.MessagePack
+-- import Z.IO.Network
+-- import Z.IO
+--
+-- serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
+--  [ ("foo", CallHandler $ \ req -> do
+--      ... )
+--  , ("bar", CallHandler $ \ req -> do
+--      ... )
+--  ]
+--
+-- @
+simpleRouter :: [(T.Text, ServerHandler)] -> ServerService
+simpleRouter handles name = FM.lookup name handleMap
+  where
+    handleMap = FM.packR handles
+
+-- | Serve a RPC service.
+serveRPC :: ServerLoop -> ServerService -> IO ()
 serveRPC serve = serveRPC' serve V.defaultChunkSize V.defaultChunkSize
 
-serveRPC' :: ServerLoop -> Int -> Int -> [(T.Text, ServerHandler)] -> IO ()
-serveRPC' serve recvBufSiz sendBufSiz handles = serve $ \ uvs -> do
+-- | Serve a RPC service with more control.
+serveRPC' :: ServerLoop
+          -> Int          -- ^ recv buffer size
+          -> Int          -- ^ send buffer size
+          -> ServerService -> IO ()
+serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
     bi <- newBufferedInput' recvBufSiz uvs
     bo <- newBufferedOutput' sendBufSiz uvs
     loop bi bo
   where
-    handleMap = FM.packR handles
     loop bi bo = do
         req <- pull (sourceParserFromBuffered (do
             tag <- P.anyWord8
@@ -163,7 +216,7 @@ serveRPC' serve recvBufSiz sendBufSiz handles = serve $ \ uvs -> do
             ) bi)
         case req of
             Just (msgid, name, v) -> do
-                case FM.lookup name handleMap of
+                case handle name of
                     Just (CallHandler f) -> do
                         res <- try (f =<< unwrap "EPARSE" (MP.convertValue v))
                         writeBuilder bo $ do

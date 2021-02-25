@@ -7,7 +7,7 @@ Maintainer  : winterland1989@gmail.com
 Stability   : experimental
 Portability : non-portable
 
-This module provides 'Converter' to convert 'Value' to haskell data types, and various tools to help user define 'MessagePack' instance.
+This module provides various tools to help user define 'MessagePack' instance, please import `Z.Data.MessagePack` to get more instances.
 
 -}
 

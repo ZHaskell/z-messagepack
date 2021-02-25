@@ -58,8 +58,7 @@ without providing data definition, e.g. the data encoded above:
 >  2kvs   4bytes                            5bytes                                  3bytes
 
 
-This property makes it suitable for passing data across language boundary, e.g. from a static typed language to a dynamic one,
-at the cost of a lower space efficiency(i.e. type tag and field label).
+This property makes it suitable for passing data across language boundary, e.g. from a static typed language to a dynamic one, at the cost of a lower space efficiency(i.e. type tag and field label).
 
 -}
 
