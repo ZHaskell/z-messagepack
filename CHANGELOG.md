@@ -1,5 +1,9 @@
 # Revision history for Z-Redis
 
+## 0.3.0.1 -- 2021-02-25
+
+* Add `callStream` and `StreamHandler`.
+
 ## 0.3.0.0 -- 2021-02-25
 
 * Add `Z.IO.RPC.MessagePack` module.
