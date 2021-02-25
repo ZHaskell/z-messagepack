@@ -1,6 +1,6 @@
 cabal-version:              >=1.10
 name:                       Z-MessagePack
-version:                    0.2.0.0
+version:                    0.3.0.0
 synopsis:                   MessagePack
 description:                MessagePack binary serialization format.
 license:                    BSD3
@@ -20,6 +20,7 @@ library
                             Z.Data.MessagePack.Base
                             Z.Data.MessagePack.Builder
                             Z.Data.MessagePack.Value
+                            Z.IO.RPC.MessagePack
 
     -- other-modules:
     -- other-extensions:
@@ -52,6 +53,7 @@ library
                             ExistentialQuantification
                             FlexibleContexts
                             FlexibleInstances
+                            GADTs
                             GeneralizedNewtypeDeriving 
                             KindSignatures
                             MagicHash

@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 {-|
 Module      : Z.Data.MessagePack
 Description : Fast MessagePack serialization/deserialization
@@ -56,8 +58,7 @@ without providing data definition, e.g. the data encoded above:
 >  2kvs   4bytes                            5bytes                                  3bytes
 
 
-This property makes it suitable for passing data across language boundary, e.g. from a static typed language to a dynamic one,
-at the cost of a lower space efficiency(i.e. type tag and field label).
+This property makes it suitable for passing data across language boundary, e.g. from a static typed language to a dynamic one, at the cost of a lower space efficiency(i.e. type tag and field label).
 
 -}
 
@@ -66,7 +67,7 @@ module Z.Data.MessagePack
     MessagePack(..), Value(..), defaultSettings, Settings(..), JSON.snakeCase, JSON.trainCase
     -- * Encode & Decode
   , readMessagePackFile, writeMessagePackFile
-  , decode, decode', decodeChunks, decodeChunks', encode, encodeChunks
+  , decode, decode', decodeChunks, encode, encodeChunks
   , DecodeError, ParseError
     -- * parse into MessagePack Value
   , parseValue, parseValue', parseValueChunks, parseValueChunks'
@@ -82,10 +83,33 @@ module Z.Data.MessagePack
   , (.=), object, (.!), object', KVItem
   ) where
 
-import Z.Data.MessagePack.Base
-import qualified Z.Data.JSON    as JSON
-import Z.Data.CBytes            (CBytes)
-import Z.IO
+import           Data.Char
+import           Data.Functor.Compose
+import           Data.Functor.Const
+import           Data.Functor.Identity
+import           Data.Functor.Product
+import           Data.Functor.Sum
+import qualified Data.Monoid                    as Monoid
+import           Data.Proxy                     (Proxy (..))
+import           Data.Scientific                (Scientific, toBoundedInteger)
+import qualified Data.Semigroup                 as Semigroup
+import           Data.Tagged                    (Tagged (..))
+import           Data.Time                      (Day, DiffTime, LocalTime, NominalDiffTime,
+                                                TimeOfDay, UTCTime, ZonedTime)
+import           Data.Time.Calendar             (CalendarDiffDays (..), DayOfWeek (..))
+import           Data.Time.LocalTime            (CalendarDiffTime (..))
+import           Data.Time.Clock.System         (SystemTime (..), utcToSystemTime, systemToUTCTime)
+import           Data.Version                   (Version(versionBranch), makeVersion)
+import           Foreign.C.Types
+import           System.Exit                    (ExitCode(..))
+import qualified Z.Data.Builder                 as B
+import           Z.Data.MessagePack.Base
+import qualified Z.Data.MessagePack.Builder     as MB
+import qualified Z.Data.JSON                    as JSON
+import qualified Z.Data.Parser                  as P
+import qualified Z.Data.Text                    as T
+import           Z.Data.CBytes            (CBytes)
+import           Z.IO
 import qualified Z.IO.FileSystem as FS
 
 -- | Decode a 'MessagePack' instance from file.
@@ -95,3 +119,224 @@ readMessagePackFile p = unwrap "EPARSE" . decode' =<< FS.readFile p
 -- | Encode a 'MessagePack' instance to file.
 writeMessagePackFile :: (HasCallStack, MessagePack a) => CBytes -> a -> IO ()
 writeMessagePackFile p x = FS.writeFile p (encode x)
+
+--------------------------------------------------------------------------------
+
+instance MessagePack ExitCode where
+    {-# INLINE fromValue #-}
+    fromValue (Str "ExitSuccess") = return ExitSuccess
+    fromValue (Int x) = return (ExitFailure (fromIntegral x))
+    fromValue _ =  fail' "converting ExitCode failed, expected a string or number"
+
+    {-# INLINE toValue #-}
+    toValue ExitSuccess     = Str "ExitSuccess"
+    toValue (ExitFailure n) = Int (fromIntegral n)
+
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack ExitSuccess     = MB.str "ExitSuccess"
+    encodeMessagePack (ExitFailure n) = B.int n
+
+-- | Only round trip 'versionBranch' as MessagePack array.
+instance MessagePack Version where
+    {-# INLINE fromValue #-}
+    fromValue v = makeVersion <$> fromValue v
+    {-# INLINE toValue #-}
+    toValue = toValue . versionBranch
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack = encodeMessagePack . versionBranch
+
+--------------------------------------------------------------------------------
+
+-- | MessagePack extension type @Ext 0xFF@
+instance MessagePack UTCTime where
+    {-# INLINE fromValue #-}
+    fromValue = withSystemTime "UTCTime" $ pure . systemToUTCTime
+    {-# INLINE toValue #-}
+    toValue t = let (MkSystemTime s ns) = utcToSystemTime t in MB.timestampValue s (fromIntegral ns)
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack t = let (MkSystemTime s ns) = utcToSystemTime t in MB.timestamp s (fromIntegral ns)
+
+-- | MessagePack extension type @Ext 0xFF@
+instance MessagePack SystemTime where
+    {-# INLINE fromValue #-}
+    fromValue = withSystemTime "UTCTime" $ pure
+    {-# INLINE toValue #-}
+    toValue (MkSystemTime s ns) = MB.timestampValue s (fromIntegral ns)
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack (MkSystemTime s ns) = MB.timestamp s (fromIntegral ns)
+
+-- | @YYYY-MM-DDTHH:MM:SS.SSSZ@
+instance MessagePack ZonedTime where
+    {-# INLINE fromValue #-}
+    fromValue = withStr "ZonedTime" $ \ t ->
+        case P.parse' (P.zonedTime <* P.endOfInput) (T.getUTF8Bytes t) of
+            Left err -> fail' $ "could not parse date as ZonedTime: " <> T.toText err
+            Right r  -> return r
+    {-# INLINE toValue #-}
+    toValue t = Str (B.unsafeBuildText (B.zonedTime t))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack t = MB.str (B.unsafeBuildText (B.zonedTime t))
+
+-- | @YYYY-MM-DD@
+instance MessagePack Day where
+    {-# INLINE fromValue #-}
+    fromValue = withStr "Day" $ \ t ->
+        case P.parse' (P.day <* P.endOfInput) (T.getUTF8Bytes t) of
+            Left err -> fail' $ "could not parse date as Day: " <> T.toText err
+            Right r  -> return r
+    {-# INLINE toValue #-}
+    toValue t = Str (B.unsafeBuildText (B.day t))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack t = MB.str (B.unsafeBuildText (B.day t))
+
+-- | @YYYY-MM-DDTHH:MM:SS.SSSZ@
+instance MessagePack LocalTime where
+    {-# INLINE fromValue #-}
+    fromValue = withStr "LocalTime" $ \ t ->
+        case P.parse' (P.localTime <* P.endOfInput) (T.getUTF8Bytes t) of
+            Left err -> fail' $ "could not parse date as LocalTime: " <> T.toText err
+            Right r  -> return r
+    {-# INLINE toValue #-}
+    toValue t = Str (B.unsafeBuildText (B.localTime t))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack t = MB.str (B.unsafeBuildText (B.localTime t))
+
+-- | @HH:MM:SS.SSS@
+instance MessagePack TimeOfDay where
+    {-# INLINE fromValue #-}
+    fromValue = withStr "TimeOfDay" $ \ t ->
+        case P.parse' (P.timeOfDay <* P.endOfInput) (T.getUTF8Bytes t) of
+            Left err -> fail' $ "could not parse time as TimeOfDay: " <> T.toText err
+            Right r  -> return r
+    {-# INLINE toValue #-}
+    toValue t = Str (B.unsafeBuildText (B.timeOfDay t))
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack t = MB.str (B.unsafeBuildText (B.timeOfDay t))
+
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'NominalDiffTime' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
+instance MessagePack NominalDiffTime where
+    {-# INLINE fromValue #-}
+    fromValue = withBoundedScientific "NominalDiffTime" $ pure . realToFrac
+    {-# INLINE toValue #-}
+    toValue = toValue @Scientific . realToFrac
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack = encodeMessagePack @Scientific . realToFrac
+
+-- | This instance includes a bounds check to prevent maliciously
+-- large inputs to fill up the memory of the target system. You can
+-- newtype 'DiffTime' and provide your own instance using
+-- 'withScientific' if you want to allow larger inputs.
+instance MessagePack DiffTime where
+    {-# INLINE fromValue #-}
+    fromValue = withBoundedScientific "DiffTime" $ pure . realToFrac
+    {-# INLINE toValue #-}
+    toValue = toValue @Scientific . realToFrac
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack = encodeMessagePack @Scientific . realToFrac
+
+instance MessagePack CalendarDiffTime where
+    {-# INLINE fromValue #-}
+    fromValue = withFlatMapR "CalendarDiffTime" $ \ v ->
+        CalendarDiffTime <$> v .: "months" <*> v .: "time"
+    {-# INLINE toValue #-}
+    toValue (CalendarDiffTime m nt) = object [ "months" .= m , "time" .= nt ]
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack (CalendarDiffTime m nt) = object' ("months" .! m <> "time" .! nt)
+
+instance MessagePack CalendarDiffDays where
+    {-# INLINE fromValue #-}
+    fromValue = withFlatMapR "CalendarDiffDays" $ \ v ->
+        CalendarDiffDays <$> v .: "months" <*> v .: "days"
+    {-# INLINE toValue #-}
+    toValue (CalendarDiffDays m d) = object ["months" .= m, "days" .= d]
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack (CalendarDiffDays m d) = object' ("months" .! m <> "days" .! d)
+
+instance MessagePack DayOfWeek where
+    {-# INLINE fromValue #-}
+    fromValue (Str "monday"   ) = pure Monday
+    fromValue (Str "tuesday"  ) = pure Tuesday
+    fromValue (Str "wednesday") = pure Wednesday
+    fromValue (Str "thursday" ) = pure Thursday
+    fromValue (Str "friday"   ) = pure Friday
+    fromValue (Str "saturday" ) = pure Saturday
+    fromValue (Str "sunday"   ) = pure Sunday
+    fromValue (Str _   )        = fail' "converting DayOfWeek failed, value should be one of weekdays"
+    fromValue v                 = typeMismatch "DayOfWeek" "String" v
+    {-# INLINE toValue #-}
+    toValue Monday    = Str "monday"
+    toValue Tuesday   = Str "tuesday"
+    toValue Wednesday = Str "wednesday"
+    toValue Thursday  = Str "thursday"
+    toValue Friday    = Str "friday"
+    toValue Saturday  = Str "saturday"
+    toValue Sunday    = Str "sunday"
+    {-# INLINE encodeMessagePack #-}
+    encodeMessagePack Monday    = MB.str "monday"
+    encodeMessagePack Tuesday   = MB.str "tuesday"
+    encodeMessagePack Wednesday = MB.str "wednesday"
+    encodeMessagePack Thursday  = MB.str "thursday"
+    encodeMessagePack Friday    = MB.str "friday"
+    encodeMessagePack Saturday  = MB.str "saturday"
+    encodeMessagePack Sunday    = MB.str "sunday"
+
+
+--------------------------------------------------------------------------------
+
+deriving newtype instance MessagePack (f (g a)) => MessagePack (Compose f g a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.Min a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.Max a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.First a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.Last a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.WrappedMonoid a)
+deriving newtype instance MessagePack a => MessagePack (Semigroup.Dual a)
+deriving newtype instance MessagePack a => MessagePack (Monoid.First a)
+deriving newtype instance MessagePack a => MessagePack (Monoid.Last a)
+deriving newtype instance MessagePack a => MessagePack (Identity a)
+deriving newtype instance MessagePack a => MessagePack (Const a b)
+deriving newtype instance MessagePack b => MessagePack (Tagged a b)
+
+--------------------------------------------------------------------------------
+
+deriving newtype instance MessagePack CChar
+deriving newtype instance MessagePack CSChar
+deriving newtype instance MessagePack CUChar
+deriving newtype instance MessagePack CShort
+deriving newtype instance MessagePack CUShort
+deriving newtype instance MessagePack CInt
+deriving newtype instance MessagePack CUInt
+deriving newtype instance MessagePack CLong
+deriving newtype instance MessagePack CULong
+deriving newtype instance MessagePack CPtrdiff
+deriving newtype instance MessagePack CSize
+deriving newtype instance MessagePack CWchar
+deriving newtype instance MessagePack CSigAtomic
+deriving newtype instance MessagePack CLLong
+deriving newtype instance MessagePack CULLong
+deriving newtype instance MessagePack CBool
+deriving newtype instance MessagePack CIntPtr
+deriving newtype instance MessagePack CUIntPtr
+deriving newtype instance MessagePack CIntMax
+deriving newtype instance MessagePack CUIntMax
+deriving newtype instance MessagePack CClock
+deriving newtype instance MessagePack CTime
+deriving newtype instance MessagePack CUSeconds
+deriving newtype instance MessagePack CSUSeconds
+deriving newtype instance MessagePack CFloat
+deriving newtype instance MessagePack CDouble
+
+--------------------------------------------------------------------------------
+
+deriving anyclass instance (MessagePack (f a), MessagePack (g a), MessagePack a) => MessagePack (Sum f g a)
+deriving anyclass instance (MessagePack a, MessagePack b) => MessagePack (Either a b)
+deriving anyclass instance (MessagePack (f a), MessagePack (g a)) => MessagePack (Product f g a)
+
+deriving anyclass instance (MessagePack a, MessagePack b) => MessagePack (a, b)
+deriving anyclass instance (MessagePack a, MessagePack b, MessagePack c) => MessagePack (a, b, c)
+deriving anyclass instance (MessagePack a, MessagePack b, MessagePack c, MessagePack d) => MessagePack (a, b, c, d)
+deriving anyclass instance (MessagePack a, MessagePack b, MessagePack c, MessagePack d, MessagePack e) => MessagePack (a, b, c, d, e)
+deriving anyclass instance (MessagePack a, MessagePack b, MessagePack c, MessagePack d, MessagePack e, MessagePack f) => MessagePack (a, b, c, d, e, f)
+deriving anyclass instance (MessagePack a, MessagePack b, MessagePack c, MessagePack d, MessagePack e, MessagePack f, MessagePack g) => MessagePack (a, b, c, d, e, f, g)
