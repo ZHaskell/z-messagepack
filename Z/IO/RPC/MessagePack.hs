@@ -32,7 +32,7 @@ import qualified Z.Data.Text as T
 withResource (initTCPClient defaultTCPClientConfig) $ \\ uvs -> do
     c <- rpcClient uvs
     call \@Int \@Int c "foo" 1
-    call \@T.Text \@T.Text c "bar" "hello"
+    notify \@T.Text c "bar" "hello"
 @
 
 -}
