@@ -1,4 +1,4 @@
-# Revision history for Z-Redis
+# Revision history for Z-MessagePack
 
 ## 0.3.0.1 -- 2021-02-25
 
