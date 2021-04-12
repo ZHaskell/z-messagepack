@@ -11,17 +11,21 @@ This module provides <https://github.com/msgpack-rpc/msgpack-rpc/blob/master/spe
 
 @
 -- server
+import Data.IORef
 import Z.IO.RPC.MessagePack
 import Z.IO.Network
 import Z.IO
 import qualified Z.Data.Text as T
 
-serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
- [ ("foo", CallHandler $ \\ (req :: Int) -> do
+newtype ServerCtx = ServerCtx { counter :: Int }
+
+serveRPC (startTCPServer defaultTCPServerConfig) (ServerCtx 0) $ simpleRouter
+ [ ("foo", CallHandler $ \\ ctx (req :: Int) -> do
+     modifyIORef ctx (ServerCtx . (+ 1) . counter)
      return (req + 1))
- , ("bar", NotifyHandler $ \\ (req :: T.Text) -> do
+ , ("bar", NotifyHandler $ \\ ctx (req :: T.Text) -> do
      printStd (req <> "world"))
- , ("qux", StreamHandler $ \\ (_ :: ()) -> do
+ , ("qux", StreamHandler $ \\ ctx (_ :: ()) -> do
     withMVar stdinBuf (pure . sourceFromBuffered))
  ]
 
@@ -53,25 +57,25 @@ module Z.IO.RPC.MessagePack where
 import           Control.Concurrent
 import           Control.Monad
 import           Data.Bits
-import           Data.Int
 import           Data.IORef
-import           Z.Data.PrimRef.PrimIORef
-import qualified Z.Data.MessagePack.Builder as MB
-import qualified Z.Data.MessagePack.Value   as MV
+import           Data.Int
 import           Z.Data.MessagePack         (MessagePack)
 import qualified Z.Data.MessagePack         as MP
+import qualified Z.Data.MessagePack.Builder as MB
+import qualified Z.Data.MessagePack.Value   as MV
 import qualified Z.Data.Parser              as P
+import           Z.Data.PrimRef.PrimIORef
 import qualified Z.Data.Text                as T
+import qualified Z.Data.Vector              as V
 import qualified Z.Data.Vector.FlatIntMap   as FIM
 import qualified Z.Data.Vector.FlatMap      as FM
-import qualified Z.Data.Vector              as V
 import           Z.IO
 import           Z.IO.Network
 
 data Client = Client
-    { _clientSeqRef :: Counter
+    { _clientSeqRef         :: Counter
     , _clientPipelineReqNum :: Counter
-    , _clientBufferedInput :: BufferedInput
+    , _clientBufferedInput  :: BufferedInput
     , _clientBufferedOutput :: BufferedOutput
     }
 
@@ -168,14 +172,14 @@ execPipeline (Client _ reqNum bi bo) = do
             tag <- P.anyWord8
             when (tag /= 0x94) (P.fail' $ "wrong response tag: " <> T.toText tag)
             !typ <- MV.value
-            !seq <- MV.value
+            !seq_ <- MV.value
             !err <- MV.value
             !v <- MV.value
             case typ of
-                MV.Int 1 -> case seq of
+                MV.Int 1 -> case seq_ of
                     MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF ->
                         return (msgid, err, v)
-                    _ -> P.fail' $ "wrong msgid: " <> T.toText seq
+                    _ -> P.fail' $ "wrong msgid: " <> T.toText seq_
                 _ -> P.fail' $ "wrong response type: " <> T.toText typ
             ) bi
         when (err /= MV.Nil) $ throwIO (RPCException err callStack)
@@ -242,7 +246,7 @@ callStream (Client seqRef reqNum bi bo) name req = do
             ) bi)
 
         -- we take tcp disconnect as eof too
-        case (join res) of
+        case join res of
             Just (err, v) -> do
                 when (err /= MV.Nil) $ throwIO (RPCException err callStack)
                 unwrap "EPARSE" (MP.convertValue v)
@@ -260,11 +264,15 @@ callStream (Client seqRef reqNum bi bo) name req = do
 --------------------------------------------------------------------------------
 
 type ServerLoop = (UVStream -> IO ()) -> IO ()
-type ServerService = T.Text -> Maybe ServerHandler
-data ServerHandler where
-    CallHandler :: (MessagePack req, MessagePack res) => (req -> IO res) -> ServerHandler
-    NotifyHandler :: MessagePack req => (req -> IO ()) -> ServerHandler
-    StreamHandler :: (MessagePack req, MessagePack res) => (req -> IO (Source res)) -> ServerHandler
+type ServerService a = T.Text -> Maybe (ServerHandler a)
+type ServerCtx a = IORef a
+data ServerHandler a where
+    CallHandler :: (MessagePack req, MessagePack res)
+                => (ServerCtx a -> req -> IO res) -> ServerHandler a
+    NotifyHandler :: MessagePack req
+                  => (ServerCtx a -> req -> IO ()) -> ServerHandler a
+    StreamHandler :: (MessagePack req, MessagePack res)
+                  => (ServerCtx a -> req -> IO (Source res)) -> ServerHandler a
 
 -- | Simple router using `FlatMap`, lookup name in /O(log(N))/.
 --
@@ -274,21 +282,23 @@ data ServerHandler where
 -- import Z.IO
 --
 -- serveRPC (startTCPServer defaultTCPServerConfig) . simpleRouter $
---  [ ("foo", CallHandler $ \\ req -> do
+--  [ ("foo", CallHandler $ \\ ctx req -> do
 --      ... )
---  , ("bar", CallHandler $ \\ req -> do
+--  , ("bar", CallHandler $ \\ ctx req -> do
 --      ... )
 --  ]
 --
 -- @
-simpleRouter :: [(T.Text, ServerHandler)] -> ServerService
+simpleRouter :: [(T.Text, ServerHandler a)] -> ServerService a
 simpleRouter handles name = FM.lookup name handleMap
   where
     handleMap = FM.packR handles
 
 -- | Serve a RPC service.
-serveRPC :: ServerLoop -> ServerService -> IO ()
-serveRPC serve = serveRPC' serve V.defaultChunkSize V.defaultChunkSize
+serveRPC :: ServerLoop -> a -> ServerService a -> IO ()
+serveRPC serve ctxData service = do
+    ctxRef <- newIORef ctxData
+    serveRPC' serve V.defaultChunkSize V.defaultChunkSize ctxRef service
 
 data Request a
     = Notify (T.Text, a)
@@ -300,8 +310,9 @@ data Request a
 serveRPC' :: ServerLoop
           -> Int          -- ^ recv buffer size
           -> Int          -- ^ send buffer size
-          -> ServerService -> IO ()
-serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
+          -> ServerCtx a
+          -> ServerService a -> IO ()
+serveRPC' serve recvBufSiz sendBufSiz ctx handle = serve $ \ uvs -> do
     bi <- newBufferedInput' recvBufSiz uvs
     bo <- newBufferedOutput' sendBufSiz uvs
     loop bi bo
@@ -326,30 +337,29 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
                 -- call
                 0x94 -> do
                     !typ <- MV.value
-                    !seq <- MV.value
+                    !seq_ <- MV.value
                     !name <- MV.value
                     !v <- MV.value
                     case typ of
-                        MV.Int 0 -> case seq of
+                        MV.Int 0 -> case seq_ of
                             MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF -> case name of
                                 MV.Str name' -> return (Call (msgid, name', v))
                                 _ -> P.fail' $ "wrong RPC name: " <> T.toText name
-                            _ -> P.fail' $ "wrong msgid: " <> T.toText seq
+                            _ -> P.fail' $ "wrong msgid: " <> T.toText seq_
                         _ -> P.fail' $ "wrong request type: " <> T.toText typ
                 _ -> P.fail' $ "wrong request tag: " <> T.toText tag
             ) bi)
-        print req
         case req of
             Just (Notify (name, v)) -> do
                 case handle name of
                     Just (NotifyHandler f) -> do
-                        f =<< unwrap "EPARSE" (MP.convertValue v)
+                        f ctx =<< unwrap "EPARSE" (MP.convertValue v)
                     _ -> throwOtherError "ENOTFOUND" "notification method not found"
                 loop bi bo
             Just (Call (msgid, name, v)) -> do
                 case handle name of
                     Just (CallHandler f) -> do
-                        res <- try (f =<< unwrap "EPARSE" (MP.convertValue v))
+                        res <- try (f ctx =<< unwrap "EPARSE" (MP.convertValue v))
                         writeBuilder bo $ do
                             MB.arrayHeader 4
                             MB.int 1                        -- type response
@@ -388,7 +398,7 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
 
                 case handle name of
                     Just (StreamHandler f) -> do
-                        src <- f =<< unwrap "EPARSE" (MP.convertValue v)
+                        src <- f ctx =<< unwrap "EPARSE" (MP.convertValue v)
                         loopSend eofRef src bo
                     _ -> do
                         writeBuilder bo $ do
