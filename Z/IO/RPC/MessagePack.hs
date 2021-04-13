@@ -8,51 +8,50 @@ Stability   : experimental
 Portability : non-portable
 
 This module provides <https://github.com/msgpack-rpc/msgpack-rpc/blob/master/spec.md MessagePack-RPC> implementation.
-
-@
--- server
-import Data.IORef
-import Z.IO.RPC.MessagePack
-import Z.IO.Network
-import Z.IO
-import qualified Z.Data.Text as T
-
-newtype ServerCtx = ServerCtx { counter :: Int }
-
-serveRPC (startTCPServer defaultTCPServerConfig) (ServerCtx 0) $ simpleRouter
- [ ("foo", CallHandler $ \\ ctx (req :: Int) -> do
-     modifyIORef ctx (ServerCtx . (+ 1) . counter)
-     return (req + 1))
- , ("bar", NotifyHandler $ \\ ctx (req :: T.Text) -> do
-     printStd (req <> "world"))
- , ("qux", StreamHandler $ \\ ctx (_ :: ()) -> do
-    withMVar stdinBuf (pure . sourceFromBuffered))
- ]
-
--- client
-import Z.IO.RPC.MessagePack
-import Z.IO.Network
-import Z.IO
-import qualified Z.Data.Text as T
-import qualified Z.Data.Vector as V
-
-withResource (initTCPClient defaultTCPClientConfig) $ \\ uvs -> do
-    c <- rpcClient uvs
-    -- single call
-    call \@Int \@Int c "foo" 1
-    -- notify without result
-    notify \@T.Text c "bar" "hello"
-    -- streaming result
-    (_, src) <- callStream c "qux" ()
-    runBIO $ src >|> sinkToIO (\\ b -> withMVar stdoutBuf (\\ bo -> do
-        writeBuffer bo b
-        flushBuffer bo))
-
-@
-
 -}
 
-module Z.IO.RPC.MessagePack where
+module Z.IO.RPC.MessagePack
+  ( -- * Example
+    --
+    -- $server-example
+    --
+    -- $client-example
+
+    -- * Server
+    ServerLoop
+  , ServerService
+  , ServerHandler (..)
+  , SessionCtx
+  , readSessionCtx
+  , writeSessionCtx
+  , clearSessionCtx
+  , modifySessionCtx
+
+  , serveRPC
+  , serveRPC'
+  , simpleRouter
+
+    -- * Client
+  , Client (..)
+  , rpcClient
+  , rpcClient'
+  , call
+  , notify
+
+    -- ** Pipeline
+  , PipelineId
+  , PipelineResult
+  , callPipeline
+  , notifyPipeline
+  , execPipeline
+  , fetchPipeline
+
+  , callStream
+
+    -- * Misc
+  , Request (..)
+  , RPCException (..)
+  ) where
 
 import           Control.Concurrent
 import           Control.Monad
@@ -71,6 +70,9 @@ import qualified Z.Data.Vector.FlatIntMap   as FIM
 import qualified Z.Data.Vector.FlatMap      as FM
 import           Z.IO
 import           Z.IO.Network
+
+-------------------------------------------------------------------------------
+-- Client
 
 data Client = Client
     { _clientSeqRef         :: Counter
@@ -215,7 +217,7 @@ fetchPipeline msgid r = do
 -- stop action. Please continue consuming until EOF reached,
 -- otherwise the state of the `Client` will be incorrect.
 callStream :: (MessagePack req, MessagePack res, HasCallStack) => Client -> T.Text -> req -> IO (IO (), Source res)
-callStream (Client seqRef reqNum bi bo) name req = do
+callStream (Client _seqRef reqNum bi bo) name req = do
     x <- readPrimIORef reqNum
     when (x == (-1)) $ throwIO (RPCStreamUnconsumed callStack)
     writePrimIORef reqNum (-1)
@@ -262,17 +264,36 @@ callStream (Client seqRef reqNum bi bo) name req = do
         flushBuffer bo
 
 --------------------------------------------------------------------------------
+-- Server
 
 type ServerLoop = (UVStream -> IO ()) -> IO ()
 type ServerService a = T.Text -> Maybe (ServerHandler a)
-type ServerCtx a = IORef a
+
+newtype SessionCtx a = SessionCtx (IORef (Maybe a))
+
+readSessionCtx :: SessionCtx a -> IO (Maybe a)
+readSessionCtx (SessionCtx x') = readIORef x'
+
+writeSessionCtx :: SessionCtx a -> a -> IO ()
+writeSessionCtx (SessionCtx x') x = writeIORef x' (Just x)
+
+clearSessionCtx :: SessionCtx a -> IO ()
+clearSessionCtx (SessionCtx x') = writeIORef x' Nothing
+
+-- | Try to modify 'SessionCtx' if it has.
+--
+-- Note that you can set the modifier function to return Nothing to clear
+-- SessionCtx.
+modifySessionCtx :: SessionCtx a -> (a -> Maybe a) -> IO ()
+modifySessionCtx (SessionCtx x') f = modifyIORef' x' (f =<<)
+
 data ServerHandler a where
     CallHandler :: (MessagePack req, MessagePack res)
-                => (ServerCtx a -> req -> IO res) -> ServerHandler a
+                => (SessionCtx a -> req -> IO res) -> ServerHandler a
     NotifyHandler :: MessagePack req
-                  => (ServerCtx a -> req -> IO ()) -> ServerHandler a
+                  => (SessionCtx a -> req -> IO ()) -> ServerHandler a
     StreamHandler :: (MessagePack req, MessagePack res)
-                  => (ServerCtx a -> req -> IO (Source res)) -> ServerHandler a
+                  => (SessionCtx a -> req -> IO (Source res)) -> ServerHandler a
 
 -- | Simple router using `FlatMap`, lookup name in /O(log(N))/.
 --
@@ -295,10 +316,8 @@ simpleRouter handles name = FM.lookup name handleMap
     handleMap = FM.packR handles
 
 -- | Serve a RPC service.
-serveRPC :: ServerLoop -> a -> ServerService a -> IO ()
-serveRPC serve ctxData service = do
-    ctxRef <- newIORef ctxData
-    serveRPC' serve V.defaultChunkSize V.defaultChunkSize ctxRef service
+serveRPC :: ServerLoop -> ServerService a -> IO ()
+serveRPC serve = serveRPC' serve V.defaultChunkSize V.defaultChunkSize
 
 data Request a
     = Notify (T.Text, a)
@@ -310,52 +329,22 @@ data Request a
 serveRPC' :: ServerLoop
           -> Int          -- ^ recv buffer size
           -> Int          -- ^ send buffer size
-          -> ServerCtx a
           -> ServerService a -> IO ()
-serveRPC' serve recvBufSiz sendBufSiz ctx handle = serve $ \ uvs -> do
+serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
+    ctx <- SessionCtx <$> newIORef Nothing
     bi <- newBufferedInput' recvBufSiz uvs
     bo <- newBufferedOutput' sendBufSiz uvs
-    loop bi bo
+    loop ctx bi bo
   where
-    loop bi bo = do
-        req <- pull (sourceParserFromBuffered (do
-            tag <- P.anyWord8
-            case tag of
-                -- notify or stream start
-                0x93 -> do
-                    !typ <- MV.value
-                    !name <- MV.value
-                    !v <- MV.value
-                    case typ of
-                        MV.Int 2 -> case name of
-                            MV.Str name' -> return (Notify (name', v))
-                            _ -> P.fail' $ "wrong RPC name: " <> T.toText name
-                        MV.Int 4 -> case name of
-                            MV.Str name' -> return (StreamStart (name', v))
-                            _ -> P.fail' $ "wrong RPC name: " <> T.toText name
-                        _ -> P.fail' $ "wrong request type: " <> T.toText typ
-                -- call
-                0x94 -> do
-                    !typ <- MV.value
-                    !seq_ <- MV.value
-                    !name <- MV.value
-                    !v <- MV.value
-                    case typ of
-                        MV.Int 0 -> case seq_ of
-                            MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF -> case name of
-                                MV.Str name' -> return (Call (msgid, name', v))
-                                _ -> P.fail' $ "wrong RPC name: " <> T.toText name
-                            _ -> P.fail' $ "wrong msgid: " <> T.toText seq_
-                        _ -> P.fail' $ "wrong request type: " <> T.toText typ
-                _ -> P.fail' $ "wrong request tag: " <> T.toText tag
-            ) bi)
+    loop ctx bi bo = do
+        req <- pull $ sourceParserFromBuffered sourceParser bi
         case req of
             Just (Notify (name, v)) -> do
                 case handle name of
                     Just (NotifyHandler f) -> do
                         f ctx =<< unwrap "EPARSE" (MP.convertValue v)
                     _ -> throwOtherError "ENOTFOUND" "notification method not found"
-                loop bi bo
+                loop ctx bi bo
             Just (Call (msgid, name, v)) -> do
                 case handle name of
                     Just (CallHandler f) -> do
@@ -380,7 +369,7 @@ serveRPC' serve recvBufSiz sendBufSiz ctx handle = serve $ \ uvs -> do
                             MB.str $ "request method: " <> name <> " not found"
                             MB.nil
                         flushBuffer bo
-                loop bi bo
+                loop ctx bi bo
             Just (StreamStart (name, v)) -> do
                 eofRef <- newIORef False
                 -- fork new thread to get stream end notification
@@ -407,9 +396,10 @@ serveRPC' serve recvBufSiz sendBufSiz ctx handle = serve $ \ uvs -> do
                             MB.str $ "request method: " <> name <> " not found"
                             MB.nil
                         flushBuffer bo
-                loop bi bo
+                loop ctx bi bo
 
             _ -> return ()
+
 
     loopSend eofRef src bo = do
         eof <- readIORef eofRef
@@ -431,3 +421,94 @@ serveRPC' serve recvBufSiz sendBufSiz ctx handle = serve $ \ uvs -> do
                     flushBuffer bo
                 _ -> atomicWriteIORef eofRef True
             loopSend eofRef src bo
+
+-------------------------------------------------------------------------------
+
+sourceParser :: P.Parser (Request MV.Value)
+sourceParser = do
+    tag <- P.anyWord8
+    case tag of
+        -- notify or stream start
+        0x93 -> do
+            !typ <- MV.value
+            !name <- MV.value
+            !v <- MV.value
+            case typ of
+                MV.Int 2 -> case name of
+                    MV.Str name' -> return (Notify (name', v))
+                    _ -> P.fail' $ "wrong RPC name: " <> T.toText name
+                MV.Int 4 -> case name of
+                    MV.Str name' -> return (StreamStart (name', v))
+                    _ -> P.fail' $ "wrong RPC name: " <> T.toText name
+                _ -> P.fail' $ "wrong request type: " <> T.toText typ
+        -- call
+        0x94 -> do
+            !typ <- MV.value
+            !seq_ <- MV.value
+            !name <- MV.value
+            !v <- MV.value
+            case typ of
+                MV.Int 0 -> case seq_ of
+                    MV.Int msgid | msgid >= 0 && msgid <= 0xFFFFFFFF -> case name of
+                        MV.Str name' -> return (Call (msgid, name', v))
+                        _ -> P.fail' $ "wrong RPC name: " <> T.toText name
+                    _ -> P.fail' $ "wrong msgid: " <> T.toText seq_
+                _ -> P.fail' $ "wrong request type: " <> T.toText typ
+        _ -> P.fail' $ "wrong request tag: " <> T.toText tag
+{-# INLINE sourceParser #-}
+
+-- $server-example
+--
+-- > import Data.Maybe
+-- > import Z.IO.RPC.MessagePack
+-- > import Z.IO.Network
+-- > import Data.IORef
+-- > import Z.IO
+-- > import qualified Z.Data.Text as T
+-- > import qualified Z.Data.Vector as V
+-- >
+-- > newtype ServerCtx = ServerCtx { counter :: Int }
+-- >
+-- > main = serveRPC (startTCPServer defaultTCPServerConfig) $ simpleRouter
+-- >  [ ("hi", CallHandler $ \ctx (req :: T.Text) -> do
+-- >      writeSessionCtx ctx (ServerCtx 0)
+-- >      return ("hello, " <> req)
+-- >    )
+-- >  , ("foo", CallHandler $ \ctx (req :: Int) -> do
+-- >      modifySessionCtx ctx (Just . ServerCtx . (+ 1) . counter)
+-- >      return (req + 1)
+-- >    )
+-- >  , ("bar", CallHandler $ \ctx (req :: T.Text) -> do
+-- >      counter . fromJust <$> readSessionCtx ctx
+-- >    )
+-- >  , ("qux", StreamHandler $ \ctx (_ :: ()) -> do
+-- >     withMVar stdinBuf (pure . sourceFromBuffered)
+-- >    )
+-- >  ]
+
+-- $client-example
+--
+-- > import Data.Maybe
+-- > import Z.IO.RPC.MessagePack
+-- > import Z.IO.Network
+-- > import Data.IORef
+-- > import Z.IO
+-- > import qualified Z.Data.Text as T
+-- > import qualified Z.Data.Vector as V
+-- >
+-- > main = withResource (initTCPClient defaultTCPClientConfig) $ \ uvs -> do
+-- >   c <- rpcClient uvs
+-- >   -- single call
+-- >   r <- call @T.Text @T.Text c "hi" "Alice"
+-- >   print r
+-- >
+-- >   _ <- call @Int @Int c "foo" 1
+-- >   _ <- call @Int @Int c "foo" 1
+-- >   x <- call @T.Text @Int c "bar" ""
+-- >   print x
+-- >
+-- >   -- streaming result
+-- >   (_, src) <- callStream c "qux" ()
+-- >   runBIO $ src >|> sinkToIO (\ b -> withMVar stdoutBuf (\ bo -> do
+-- >     writeBuffer bo b
+-- >     flushBuffer bo))
