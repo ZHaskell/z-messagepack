@@ -1,6 +1,6 @@
 cabal-version:      >=1.10
 name:               Z-MessagePack
-version:            0.4.0.0
+version:            0.4.0.1
 synopsis:           MessagePack
 description:        MessagePack binary serialization format.
 license:            BSD3
