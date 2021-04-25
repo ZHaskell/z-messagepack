@@ -67,10 +67,10 @@ module Z.Data.MessagePack
     MessagePack(..), Value(..), defaultSettings, Settings(..), JSON.snakeCase, JSON.trainCase
     -- * Encode & Decode
   , readMessagePackFile, writeMessagePackFile
-  , decode, decode', decodeChunks, encode, encodeChunks
+  , decode, decode', decodeChunk, decodeChunks, encode, encodeChunks
   , DecodeError, ParseError
     -- * parse into MessagePack Value
-  , parseValue, parseValue', parseValueChunks, parseValueChunks'
+  , parseValue, parseValue'
   -- * Generic FromValue, ToValue & EncodeMessagePack
   , gToValue, gFromValue, gEncodeMessagePack
   -- * Convert 'Value' to Haskell data

@@ -228,7 +228,7 @@ callStream (Client _seqRef reqNum bi bo) name req = do
         MP.encodeMessagePack req        -- param
     flushBuffer bo
     return (sendEOF, sourceFromIO $ do
-        res <- pull (sourceParserFromBuffered (do
+        res <- readParser (do
             tag <- P.anyWord8
             -- stream stop
             case tag of
@@ -245,10 +245,10 @@ callStream (Client _seqRef reqNum bi bo) name req = do
                         P.fail' $ "wrong response type: " <> T.toText typ
                     return (Just (err, v))
                 _ -> P.fail' $ "wrong response tag: " <> T.toText tag
-            ) bi)
+            ) bi
 
         -- we take tcp disconnect as eof too
-        case join res of
+        case res of
             Just (err, v) -> do
                 when (err /= MV.Nil) $ throwIO (RPCException err callStack)
                 unwrap "EPARSE" (MP.convertValue v)
@@ -292,8 +292,10 @@ data ServerHandler a where
                 => (SessionCtx a -> req -> IO res) -> ServerHandler a
     NotifyHandler :: MessagePack req
                   => (SessionCtx a -> req -> IO ()) -> ServerHandler a
+    -- | 'StreamHandler' will receive an 'IORef' which get updated to 'True'
+    -- when client send stream end packet, stream should end up ASAP.
     StreamHandler :: (MessagePack req, MessagePack res)
-                  => (SessionCtx a -> req -> IO (Source res)) -> ServerHandler a
+                  => (SessionCtx a -> IORef Bool -> req -> IO (Source res)) -> ServerHandler a
 
 -- | Simple router using `FlatMap`, lookup name in /O(log(N))/.
 --
@@ -337,15 +339,15 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
     loop ctx bi bo
   where
     loop ctx bi bo = do
-        req <- pull $ sourceParserFromBuffered sourceParser bi
+        req <- readParser sourceParser bi
         case req of
-            Just (Notify (name, v)) -> do
+            Notify (name, v) -> do
                 case handle name of
                     Just (NotifyHandler f) -> do
                         f ctx =<< unwrap "EPARSE" (MP.convertValue v)
                     _ -> throwOtherError "ENOTFOUND" "notification method not found"
                 loop ctx bi bo
-            Just (Call (msgid, name, v)) -> do
+            Call (msgid, name, v) -> do
                 case handle name of
                     Just (CallHandler f) -> do
                         res <- try (f ctx =<< unwrap "EPARSE" (MP.convertValue v))
@@ -370,11 +372,11 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
                             MB.nil
                         flushBuffer bo
                 loop ctx bi bo
-            Just (StreamStart (name, v)) -> do
+            StreamStart (name, v) -> do
                 eofRef <- newIORef False
                 -- fork new thread to get stream end notification
                 forkIO $ do
-                    pull (sourceParserFromBuffered (do
+                    _ <- readParser (do
                         tag <- P.anyWord8
                         -- stream stop
                         when (tag /= 0x91) $
@@ -382,49 +384,44 @@ serveRPC' serve recvBufSiz sendBufSiz handle = serve $ \ uvs -> do
                         !typ <- MV.value
                         when (typ /= MV.Int 5) $
                             P.fail' $ "wrong request type: " <> T.toText typ
-                        ) bi)
+                        ) bi
                     atomicWriteIORef eofRef True
 
                 case handle name of
-                    Just (StreamHandler f) -> do
-                        src <- f ctx =<< unwrap "EPARSE" (MP.convertValue v)
-                        loopSend eofRef src bo
-                    _ -> do
-                        writeBuilder bo $ do
-                            MB.arrayHeader 3
-                            MB.int 6                        -- type response
-                            MB.str $ "request method: " <> name <> " not found"
-                            MB.nil
-                        flushBuffer bo
+                    Just (StreamHandler f) -> (do
+                        src <- f ctx eofRef =<< unwrap "EPARSE" (MP.convertValue v)
+                        src (writeItem bo) EOF) `catch` (\ (e :: SomeException) ->
+                            writeErrorItem bo $ "error when stream: " <> T.toText e)
+                    _ -> writeErrorItem bo $ "request method: " <> name <> " not found"
                 loop ctx bi bo
 
-            _ -> return ()
+    writeItem bo = \ mx -> do
+        case mx of
+            Just x -> do
+                writeBuilder bo $ do
+                    MB.arrayHeader 3
+                    MB.int 6                        -- type stream item
+                    MB.nil
+                    MP.encodeMessagePack x
+                flushBuffer bo
+            _ -> do
+                writeBuilder bo $ do
+                    MB.arrayHeader 1
+                    MB.int 7                        -- type stream end
+                flushBuffer bo
 
-
-    loopSend eofRef src bo = do
-        eof <- readIORef eofRef
-        if eof
-        then do
-            writeBuilder bo $ do
-                MB.arrayHeader 1
-                MB.int 7                        -- type response
-            flushBuffer bo
-        else do
-            r <- pull src
-            case r of
-                Just r' -> do
-                    writeBuilder bo $ do
-                        MB.arrayHeader 3
-                        MB.int 6                        -- type response
-                        MB.nil
-                        MP.encodeMessagePack r'
-                    flushBuffer bo
-                _ -> atomicWriteIORef eofRef True
-            loopSend eofRef src bo
+    writeErrorItem bo msg = do
+        writeBuilder bo $ do
+            MB.arrayHeader 3
+            MB.int 6                                -- type stream item
+            MB.str msg
+            MB.nil
+        flushBuffer bo
 
 -------------------------------------------------------------------------------
 
 sourceParser :: P.Parser (Request MV.Value)
+{-# INLINE sourceParser #-}
 sourceParser = do
     tag <- P.anyWord8
     case tag of
@@ -455,7 +452,6 @@ sourceParser = do
                     _ -> P.fail' $ "wrong msgid: " <> T.toText seq_
                 _ -> P.fail' $ "wrong request type: " <> T.toText typ
         _ -> P.fail' $ "wrong request tag: " <> T.toText tag
-{-# INLINE sourceParser #-}
 
 -- $server-example
 --
@@ -481,8 +477,16 @@ sourceParser = do
 -- >  , ("bar", CallHandler $ \ctx (req :: T.Text) -> do
 -- >      counter . fromJust <$> readSessionCtx ctx
 -- >    )
--- >  , ("qux", StreamHandler $ \ctx (_ :: ()) -> do
--- >     withMVar stdinBuf (pure . sourceFromBuffered)
+-- >  , ("qux", StreamHandler $ \ctx eofRef (_ :: ()) -> do
+-- >     withMVar stdinBuf (\ stdin -> pure $ \ k _ -> do
+--          eof <- readIORef eofRef
+--          if eof
+--          then k EOF
+--          else do
+--              r <- readBuffer stdin
+--              if V.null r
+--              then k EOF
+--              else k (Just r))
 -- >    )
 -- >  ]
 

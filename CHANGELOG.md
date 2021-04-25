@@ -1,5 +1,9 @@
 # Revision history for Z-MessagePack
 
+## 0.4.1.0 -- 2021-04-25
+
+* Adapt to `Z-IO` 0.8. Add stream error handling code.
+
 ## 0.3.0.1 -- 2021-02-25
 
 * Add `callStream` and `StreamHandler`.

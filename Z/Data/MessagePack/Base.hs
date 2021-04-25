@@ -15,10 +15,10 @@ module Z.Data.MessagePack.Base
   ( -- * MessagePack Class
     MessagePack(..), Value(..), defaultSettings, Settings(..)
     -- * Encode & Decode
-  , decode, decode', decodeChunks, encode, encodeChunks
+  , decode, decode', decodeChunk, decodeChunks, encode, encodeChunks
   , DecodeError, P.ParseError, P.ParseChunks
     -- * parse into MessagePack Value
-  , MV.parseValue, MV.parseValue', MV.parseValueChunks, MV.parseValueChunks'
+  , MV.parseValue, MV.parseValue'
   -- * Generic FromValue, ToValue & EncodeMessagePack
   , gToValue, gFromValue, gEncodeMessagePack
   -- * Convert 'Value' to Haskell data
@@ -145,17 +145,24 @@ decode bs = case P.parse MV.value bs of
         Left cErr -> (bs', Left (Right cErr))
         Right r   -> (bs', Right r)
 
+-- | Decode a MessagePack doc chunk.
+decodeChunk :: MessagePack a => V.Bytes -> P.Result DecodeError a
+{-# INLINE decodeChunk #-}
+decodeChunk bs = loop (P.parseChunk MV.value bs)
+  where
+    loop r = do
+        case r of
+            P.Success v rest ->
+                case convertValue v of
+                    Left cErr -> P.Failure (Right cErr) rest
+                    Right r'  -> P.Success r' rest
+            P.Failure e rest -> P.Failure (Left e) rest
+            P.Partial f' -> P.Partial (loop . f')
+
 -- | Decode MessagePack doc chunks, return trailing bytes.
-decodeChunks :: (MessagePack a, Monad m) => m V.Bytes -> V.Bytes -> m (V.Bytes, Either DecodeError a)
+decodeChunks :: (MessagePack a, Monad m) => P.ParseChunks m DecodeError a
 {-# INLINE decodeChunks #-}
-decodeChunks mb bs = do
-    mr <- P.parseChunks MV.value mb bs
-    case mr of
-        (bs', Left pErr) -> pure (bs', Left (Left pErr))
-        (bs', Right v) ->
-            case convertValue v of
-                Left cErr -> pure (bs', Left (Right cErr))
-                Right r   -> pure (bs', Right r)
+decodeChunks = P.parseChunks decodeChunk
 
 -- | Directly encode data to MessagePack bytes.
 encode :: MessagePack a => a -> V.Bytes
