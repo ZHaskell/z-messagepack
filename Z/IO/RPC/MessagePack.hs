@@ -478,15 +478,15 @@ sourceParser = do
 -- >      counter . fromJust <$> readSessionCtx ctx
 -- >    )
 -- >  , ("qux", StreamHandler $ \ctx eofRef (_ :: ()) -> do
--- >     withMVar stdinBuf (\ stdin -> pure $ \ k _ -> do
---          eof <- readIORef eofRef
---          if eof
---          then k EOF
---          else do
---              r <- readBuffer stdin
---              if V.null r
---              then k EOF
---              else k (Just r))
+-- >      withMVar stdinBuf (\ stdin -> pure $ \ k _ -> do
+-- >        eof <- readIORef eofRef
+-- >        if eof
+-- >        then k EOF
+-- >        else do
+-- >            r <- readBuffer stdin
+-- >            if V.null r
+-- >            then k EOF
+-- >            else k (Just r))
 -- >    )
 -- >  ]
 
