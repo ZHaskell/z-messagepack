@@ -1,6 +1,6 @@
 cabal-version:      >=1.10
 name:               Z-MessagePack
-version:            0.4.0.2
+version:            0.4.1.0
 synopsis:           MessagePack
 description:        MessagePack binary serialization format.
 license:            BSD3
@@ -13,6 +13,10 @@ build-type:         Simple
 homepage:           https://github.com/ZHaskell/z-messagepack
 bug-reports:        https://github.com/ZHaskell/z-messagepack/issues
 extra-source-files: CHANGELOG.md
+
+source-repository head
+  type:     git
+  location: git://github.com/ZHaskell/z-messagepack.git
 
 library
   exposed-modules:
