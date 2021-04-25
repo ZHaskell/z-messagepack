@@ -1,8 +1,10 @@
-on: [push, pull_request]
 name: osx-ci
+on: [push, pull_request]
+
 jobs:
   build:
-    runs-on: macOS-latest
+    name: Build on macos-10.15:ghc-${{ matrix.ghc }}:cabal-${{ matrix.cabal }}
+    runs-on: macos-10.15
     strategy:
       matrix:
         ghc: ['8.6', '8.8', '8.10']
@@ -13,7 +15,6 @@ jobs:
             cabal: 2.4
           - ghc: 8.10
             cabal: 2.4
-    name: Haskell GHC ${{ matrix.ghc }} sample
     env:
         CONFIG: "--enable-tests --enable-benchmarks"
     steps:
@@ -29,21 +30,25 @@ jobs:
 
       - run: cabal v2-update
       - run: cabal v2-freeze $CONFIG
+
       - uses: actions/cache@v2
         with:
           path: |
-            ${{ steps.setup-haskell-cabal.outputs.cabal-store }}
+            ~/.cabal/packages
+            ~/.cabal/store
             dist-newstyle
           key: ${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.ghc }}-
 
-      - run: cabal v2-configure $CONFIG
-      - run: cabal v2-build $CONFIG
+      - run: "cabal update && cabal v2-build $CONFIG"
+      - run: cabal v2-configure --enable-tests 
 
-      - if: matrix.cabal == '2.4.1.0'
+      - if: "matrix.cabal < '3'"
         run: cabal v2-test
-      - if: matrix.cabal == '3.4.0.0'
+      - if: "matrix.cabal >= '3'"
         run: cabal v2-test --test-show-details=direct
+
+      - run: cabal check
       - run: cabal v2-haddock
       - run: cabal v2-sdist

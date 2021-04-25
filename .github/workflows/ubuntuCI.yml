@@ -1,8 +1,10 @@
-on: [push, pull_request]
 name: ubuntu-ci
+on: [push, pull_request]
+
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    name: Build on ubuntu-18.04:ghc-${{ matrix.ghc }}:cabal-${{ matrix.cabal }}
+    runs-on: ubuntu-18.04
     strategy:
       matrix:
         ghc: ['8.6', '8.8', '8.10']
@@ -13,13 +15,20 @@ jobs:
             cabal: 2.4
           - ghc: 8.10
             cabal: 2.4
-    name: Haskell GHC ${{ matrix.ghc }} sample
-    env:
-        CONFIG: "--enable-tests --enable-benchmarks"
     steps:
       - uses: actions/checkout@v2
         with:
           submodules: 'recursive'
+
+      - uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cabal/packages
+            ~/.cabal/store
+            dist-newstyle
+          key: ${{ runner.os }}-${{ matrix.ghc }}-${{ matrix.cabal }}-v1-${{ hashFiles('**/*.cabal') }}-${{ hashFiles('**/cabal.project') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.ghc }}-${{ matrix.cabal }}-v1-
 
       - name: Setup Haskell
         uses: haskell/actions/setup@v1
@@ -28,22 +37,24 @@ jobs:
           cabal-version: ${{ matrix.cabal }}
 
       - run: cabal v2-update
-      - run: cabal v2-freeze $CONFIG
-      - uses: actions/cache@v2
-        with:
-          path: |
-            ${{ steps.setup-haskell-cabal.outputs.cabal-store }}
-            dist-newstyle
-          key: ${{ runner.os }}-${{ matrix.ghc }}-${{ hashFiles('cabal.project.freeze') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.ghc }}-
 
-      - run: cabal v2-configure $CONFIG
-      - run: cabal v2-build $CONFIG
+      - name: sdist
+        run: |
+          mkdir -p $HOME/sdist
+          cabal v2-sdist --output-dir $HOME/sdist
 
-      - if: matrix.cabal == '2.4.1.0'
-        run: cabal v2-test 
-      - if: matrix.cabal == '3.4.0.0'
+      - name: unpack
+        run: |
+          rm -rf $GITHUB_WORKSPACE/*
+          find $HOME/sdist -maxdepth 1 -type f -name '*.tar.gz' -exec tar -C $GITHUB_WORKSPACE -xzvf {} --strip 1 \;
+
+      - name: build
+        run: cabal v2-build --upgrade-dependencies --enable-tests --enable-benchmarks
+
+      - if: "matrix.cabal < '3'"
+        run: cabal v2-test
+      - if: "matrix.cabal >= '3'"
         run: cabal v2-test --test-show-details=direct
+
+      - run: cabal check
       - run: cabal v2-haddock
-      - run: cabal v2-sdist
