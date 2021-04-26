@@ -513,6 +513,6 @@ sourceParser = do
 -- >
 -- >   -- streaming result
 -- >   (_, src) <- callStream c "qux" ()
--- >   runBIO $ src >|> sinkToIO (\ b -> withMVar stdoutBuf (\ bo -> do
+-- >   runBIO_ $ src . sinkToIO (\ b -> withMVar stdoutBuf (\ bo -> do
 -- >     writeBuffer bo b
 -- >     flushBuffer bo))
